@@ -1,10 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import random
 from torch.utils.data import Dataset, DataLoader
 
 
 from tqdm import tqdm
+
+SEED = 42
+random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+  torch.cuda.manual_seed(SEED)
+  torch.cuda.manual_seed_all(SEED)
 
 
 # Do not change function signature
@@ -22,7 +30,7 @@ def init_model() -> nn.Module:
         self.layers = nn.ModuleList()
 
         self.relu    = nn.ReLU()
-        self.dropout = nn.Dropout(p=0.2)
+        self.dropout = nn.Dropout(p=0.3)
 
         # Layer 0
         self.l0   = nn.Linear(self.input_dim,lin_layers[0])
@@ -49,7 +57,7 @@ def init_model() -> nn.Module:
            self.l1,self.bn1,self.relu,
            self.l2,self.bn2,self.relu,self.dropout,
            self.l3,self.bn3,self.relu,
-           self.l_out,self.softmax
+           self.l_out
         ]
         self.layers = nn.Sequential(*layers_)
 
@@ -71,9 +79,9 @@ def init_model() -> nn.Module:
 
 # Do not change function signature
 def train_model(model: nn.Module, dev_dataset: Dataset) -> nn.Module:
-  NUM_epochs = 25
+  NUM_epochs = 80
   FREQ_epoch=1
-  LOG_LEVEL=3
+  LOG_LEVEL=2
   batch_size = 64
   device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -81,6 +89,7 @@ def train_model(model: nn.Module, dev_dataset: Dataset) -> nn.Module:
   train_dataloader = DataLoader(dev_dataset, batch_size=batch_size, pin_memory=True)
   optimiser = torch.optim.SGD(model.parameters(), lr=1e-3)
   loss_fn = nn.CrossEntropyLoss()
+  scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=100, gamma=0.8)
 
   def training_loop(
         dataloader: torch.utils.data.DataLoader,
@@ -143,12 +152,15 @@ def train_model(model: nn.Module, dev_dataset: Dataset) -> nn.Module:
 
     return correct / size
 
-  def train(dataloader, net, loss_fn, optimiser, epochs, epoch_frequency=50, device=device, verbosity=3):
+  def train(dataloader, net, loss_fn, optimiser, epochs, epoch_frequency=50, device=device, verbosity=LOG_LEVEL):
     least_loss = None
     if verbosity < 2:
         for t in tqdm(range(epochs)):
+            optimiser : torch.optim.SGD
+            
             mean_loss = training_loop(dataloader, net, loss_fn, optimiser, verbosity=verbosity)
             accuracy = testing_loop(dataloader, net)
+            scheduler.step()
             if not least_loss or mean_loss < least_loss:
                 least_loss = mean_loss
     else:
@@ -158,6 +170,7 @@ def train_model(model: nn.Module, dev_dataset: Dataset) -> nn.Module:
 
             mean_loss = training_loop(dataloader, net, loss_fn, optimiser, verbosity=verbosity)
             accuracy = testing_loop(dataloader, net)
+            scheduler.step()
             if not least_loss or mean_loss < least_loss:
                 least_loss = mean_loss
 
