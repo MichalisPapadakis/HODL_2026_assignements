@@ -2,3 +2,4 @@
 data_scratch/
 test.py
 __pycache__/
+checkpoints/
