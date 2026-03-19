@@ -26,7 +26,7 @@ except Exception:
 #########
 SEED = 42
 IMG_SIZE = 224
-BATCH_SIZE = 32
+BATCH_SIZE = 32 #8 for laptop
 EPOCHS_FREEZE = 5
 EPOCHS_FULL = 5
 LR_FREEZE = 1e-3
