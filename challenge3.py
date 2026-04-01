@@ -73,12 +73,23 @@ class LSTMSequenceClassifier(nn.Module):
         outputs, _ = self.lstm(embedded)
 
         if attention_mask is not None:
-            lengths = attention_mask.sum(dim=1).clamp(min=1)
-            last_index = lengths - 1
-            pooled = outputs[torch.arange(outputs.size(0), device=outputs.device), last_index]
+            # 2. Create a mask that matches the output dimensions [Batch, Seq_Len, Hidden_Size]
+            # We convert mask to float and add a dimension at the end
+            mask = attention_mask.unsqueeze(-1).expand(outputs.size()).float()
+            
+            # 3. Sum all hidden states, but zero out the ones corresponding to padding
+            sum_embeddings = torch.sum(outputs * mask, dim=1)
+            
+            # 4. Count how many real (non-padding) tokens were in each sequence
+            num_real_tokens = torch.clamp(mask.sum(1), min=1e-9)
+            
+            # 5. Calculate the mean: Total Sum / Number of Real Tokens
+            pooled = sum_embeddings / num_real_tokens
         else:
-            pooled = outputs[:, -1, :]
+            # Fallback to simple mean if no mask is provided
+            pooled = outputs.mean(dim=1)
 
+        # 6. Pass the "summary" vector to the classifier
         logits = self.classifier(pooled)
 
         loss = None
