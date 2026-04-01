@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from datasets import load_dataset
+from transformers import AutoModel
 
 import random
 SEED = 42
@@ -43,7 +44,7 @@ class LSTMSequenceClassifier(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        embedding_dim: int = 128,
+        embedding_dim: int = 738,
         hidden_size: int = 256,
         num_layers: int = 2,
         num_labels: int = 2,
@@ -100,12 +101,18 @@ def init_model() -> nn.Module:
     """
     model = LSTMSequenceClassifier(
         vocab_size=tokenizer.vocab_size,
-        embedding_dim=128,
+        embedding_dim=768,
         hidden_size=256,
         num_layers=2,
         num_labels=2,
         pad_token_id=tokenizer.pad_token_id,
     )
+
+    pretrained_distilbert = AutoModel.from_pretrained('distilbert-base-uncased')
+    model.embedding.weight.data.copy_(
+        pretrained_distilbert.embeddings.word_embeddings.weight.data
+    )
+    model.embedding.weight.requires_grad = False
     return model
 
 
