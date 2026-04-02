@@ -237,14 +237,20 @@ def get_data():
     imdb_train = tokenized_imdb['train']
     imdb_test = tokenized_imdb['test']
 
-    # amazon = load_dataset('amazon_polarity')
-    # amazon_train = amazon['train']
-    # amazon_test = amazon['test']
+    amazon = load_dataset('amazon_polarity')
+    amazon = amazon.rename_column("content", "text")
+    amazon_train = amazon["train"].shuffle(seed=42).select(range(10000))
+    amazon_test = amazon["test"].shuffle(seed=42).select(range(2000))
+
+    # print(amazon)
+
+    tokenized_amazon_train = amazon_train.map(preprocess_function, batched=True)
+    tokenized_amazon_test = amazon_test.map(preprocess_function, batched=True)
     
     # print( amazon_train[0])
     # print( imdb_train[0])
 
-    return imdb_train, imdb_train, imdb_test
+    return imdb_train,  tokenized_amazon_train, tokenized_amazon_test
 
 
 def run():
