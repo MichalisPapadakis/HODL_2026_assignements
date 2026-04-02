@@ -9,9 +9,9 @@ from transformers import AutoModel
 import random
 SEED = 42
 random.seed(SEED)
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device(
+    'cuda') if torch.cuda.is_available() else torch.device('cpu')
 tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
-
 
 
 # Do not change function signature
@@ -76,13 +76,13 @@ class LSTMSequenceClassifier(nn.Module):
             # 2. Create a mask that matches the output dimensions [Batch, Seq_Len, Hidden_Size]
             # We convert mask to float and add a dimension at the end
             mask = attention_mask.unsqueeze(-1).expand(outputs.size()).float()
-            
+
             # 3. Sum all hidden states, but zero out the ones corresponding to padding
             sum_embeddings = torch.sum(outputs * mask, dim=1)
-            
+
             # 4. Count how many real (non-padding) tokens were in each sequence
             num_real_tokens = torch.clamp(mask.sum(1), min=1e-9)
-            
+
             # 5. Calculate the mean: Total Sum / Number of Real Tokens
             pooled = sum_embeddings / num_real_tokens
         else:
@@ -119,7 +119,8 @@ def init_model() -> nn.Module:
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    pretrained_distilbert = AutoModel.from_pretrained('distilbert-base-uncased')
+    pretrained_distilbert = AutoModel.from_pretrained(
+        'distilbert-base-uncased')
     model.embedding.weight.data.copy_(
         pretrained_distilbert.embeddings.word_embeddings.weight.data
     )
@@ -156,39 +157,60 @@ def train_model(
     Return:
         trained model
     """
-    training_args = TrainingArguments(
-        output_dir="data_scratch/results",
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=128,
-        num_train_epochs=10,
-        weight_decay=0.05,
-        eval_strategy='epoch',
-        report_to=[],  # Disable wandb and other external loggers if needed
-        save_strategy="no",
-        logging_strategy="epoch",
-    )
-
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         predictions = np.argmax(logits, axis=-1)
         accuracy = np.mean(predictions == labels)
         return {"accuracy": accuracy}
 
-    trainer = Trainer(
+    stage1_args = TrainingArguments(
+        output_dir="data_scratch/results/stage1_imdb",
+        learning_rate=5e-4,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=128,
+        num_train_epochs=2,
+        weight_decay=0.05,
+        eval_strategy="epoch",
+        report_to=[],
+        save_strategy="no",
+        logging_strategy="epoch",
+    )
+
+    stage1_trainer = Trainer(
         model=model,
-        args=training_args,
+        args=stage1_args,
         train_dataset=imdb_dataset,
         eval_dataset=amazon_dataset,
         compute_metrics=compute_metrics,
     )
+    stage1_trainer.train()
 
-    trainer.train()
-    return trainer.model
+    stage2_args = TrainingArguments(
+        output_dir="data_scratch/results/stage2_amazon",
+        learning_rate=2e-5,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=128,
+        num_train_epochs=1,
+        weight_decay=0.05,
+        eval_strategy="epoch",
+        report_to=[],
+        save_strategy="no",
+        logging_strategy="epoch",
+    )
+
+    stage2_trainer = Trainer(
+        model=stage1_trainer.model,
+        args=stage2_args,
+        train_dataset=amazon_dataset,
+        eval_dataset=amazon_dataset,
+        compute_metrics=compute_metrics,
+    )
+    stage2_trainer.train()
+    return stage2_trainer.model
 
 
 # ===========================================
-## HELPERS
+# HELPERS
 # ===========================================
 def evaluate_model(model: nn.Module, amazon_test):
     training_args = TrainingArguments(
@@ -211,8 +233,6 @@ def evaluate_model(model: nn.Module, amazon_test):
 def get_data():
     imdb = load_dataset("imdb")
     tokenized_imdb = imdb.map(preprocess_function, batched=True)
-
-
 
     imdb_train = tokenized_imdb['train']
     imdb_test = tokenized_imdb['test']
