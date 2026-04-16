@@ -39,7 +39,33 @@ def preprocess_function(examples: dict) -> dict:
     )
     return tokenized_sample
 
+class Transformer(nn.Module):
+    def __init__(self, transformer, output_dim, freeze=False):
+        super().__init__()
+        self.transformer = transformer
+        hidden_dim = transformer.config.hidden_size
+        self.fc = nn.Linear(hidden_dim, output_dim)
+        
+        if freeze:
+            for param in self.transformer.parameters():
+                param.requires_grad = False
 
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        # The notebook passes ids as the first argument
+        # We include attention_mask and labels to remain compatible with the Trainer
+        output = self.transformer(input_ids, attention_mask=attention_mask)
+        hidden = output.last_hidden_state
+        
+        # Use the [CLS] token (first token) for prediction
+        cls_hidden = hidden[:, 0, :]
+        logits = self.fc(torch.tanh(cls_hidden))
+
+        loss = None
+        if labels is not None:
+            loss_fn = nn.CrossEntropyLoss()
+            loss = loss_fn(logits, labels)
+
+        return {"loss": loss, "logits": logits}
 class LSTMSequenceClassifier(nn.Module):
     def __init__(
         self,
@@ -110,21 +136,33 @@ def init_model() -> nn.Module:
     Output:
         logits: [B, 2]
     """
-    model = LSTMSequenceClassifier(
-        vocab_size=tokenizer.vocab_size,
-        embedding_dim=768,
-        hidden_size=256,
-        num_layers=2,
-        num_labels=2,
-        pad_token_id=tokenizer.pad_token_id,
-    )
+    # model = LSTMSequenceClassifier(
+    #     vocab_size=tokenizer.vocab_size,
+    #     embedding_dim=768,
+    #     hidden_size=256,
+    #     num_layers=2,
+    #     num_labels=2,
+    #     pad_token_id=tokenizer.pad_token_id,
+    # )
 
-    pretrained_distilbert = AutoModel.from_pretrained(
-        'distilbert-base-uncased')
-    model.embedding.weight.data.copy_(
-        pretrained_distilbert.embeddings.word_embeddings.weight.data
+    # pretrained_distilbert = AutoModel.from_pretrained(
+    #     'distilbert-base-uncased')
+    # model.embedding.weight.data.copy_(
+    #     pretrained_distilbert.embeddings.word_embeddings.weight.data
+    # )
+    # model.embedding.weight.requires_grad = False
+
+    # Use the same transformer name as the notebook
+    transformer_name = 'bert-base-uncased' 
+    pretrained_model = AutoModel.from_pretrained(transformer_name)
+    
+    # Initialize the Transformer wrapper with 2 labels
+    model = Transformer(
+        transformer=pretrained_model,
+        output_dim=2,
+        freeze=False  # Set to True if you only want to train the head
     )
-    model.embedding.weight.requires_grad = False
+    
     return model
 
 
