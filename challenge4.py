@@ -108,8 +108,8 @@ def plot_path_predictions(
 
 ### === NN FUNCTIONS === ###
 class MazeConv(MessagePassing):
-    def __init__(self, hidden_dim: int):
-        super().__init__(aggr="min")
+    def __init__(self, hidden_dim: int, aggr: str = "min"):
+        super().__init__(aggr=aggr)
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * hidden_dim, hidden_dim),
             torch.nn.ReLU(),
@@ -133,12 +133,12 @@ class MazeConv(MessagePassing):
 
 
 class MazeGNN(torch.nn.Module):
-    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2):
+    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2, aggr: str = "min"):
         super().__init__()
                 
         self.dropout = dropout
         self.encoder = self.get_mlp(2, hidden_dim, hidden_dim,last_relu=True)
-        self.conv1 = MazeConv(hidden_dim)
+        self.conv1 = MazeConv(hidden_dim, aggr=aggr)
         # self.conv2 = MazeConv(hidden_dim)
         # self.conv3 = MazeConv(hidden_dim)
         self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=False)
