@@ -30,75 +30,7 @@ if torch.cuda.is_available():
   torch.cuda.manual_seed_all(SEED)
 
 
-### === DATASET GENERATION === ###
-def _build_maze_tree_graph(grid_size: int, seed: int):
-    grid_graph = nx.grid_2d_graph(grid_size, grid_size)
-    rng = random.Random(seed)
-
-    def to_id(node):
-        r, c = node
-        return r * grid_size + c
-
-    # Randomize edge weights, then take MST => random spanning tree on grid.
-    for u, v in grid_graph.edges():
-        grid_graph[u][v]["w"] = rng.random()
-    nx_tree_2d = nx.minimum_spanning_tree(grid_graph, weight="w")
-
-    # Safety checks: one connected tree spanning all nodes.
-    if not nx.is_tree(nx_tree_2d):
-        raise ValueError("Generated maze graph is not a valid spanning tree.")
-    if nx.number_connected_components(nx_tree_2d) != 1:
-        raise ValueError("Generated maze graph has disconnected components.")
-
-    for u, v in nx_tree_2d.edges():
-        if abs(u[0] - v[0]) + abs(u[1] - v[1]) != 1:
-            raise ValueError("Invalid edge in maze tree: non-neighbor nodes connected.")
-
-    relabel_map = {node: to_id(node) for node in nx_tree_2d.nodes()}
-    nx_graph = nx.relabel_nodes(nx_tree_2d, relabel_map)
-    num_nodes = grid_size * grid_size
-    if num_nodes > 1:
-        if min(dict(nx_graph.degree()).values()) < 1:
-            raise ValueError("Generated maze graph has isolated nodes.")
-        if nx_graph.number_of_edges() != num_nodes - 1:
-            raise ValueError("Generated maze graph does not have N-1 edges.")
-
-    torch_rng = torch.Generator().manual_seed(seed)
-    endpoints = torch.randperm(num_nodes, generator=torch_rng)[:2].tolist()
-    source, target = endpoints[0], endpoints[1]
-    path_nodes = set(nx.shortest_path(nx_graph, source=source, target=target))
-
-    # Input features: one-hot encoding of source and target nodes
-    graph = from_networkx(nx_graph)
-    graph.x = torch.zeros(num_nodes, 2, dtype=torch.float32)
-    graph.x[source, 0] = 1.0
-    graph.x[target, 1] = 1.0
-
-    # Labels: 1 for nodes on the path, 0 otherwise
-    graph.y = torch.zeros(num_nodes, dtype=torch.long)
-    for node in path_nodes:
-        graph.y[node] = 1
-
-    graph.source = source
-    graph.target = target
-    graph.grid_size = grid_size
-    graph.path_nodes = torch.tensor(sorted(path_nodes), dtype=torch.long)
-    return graph
-
-
-def train_dataset_gen(
-    n_samples: int = 200,
-    grid_size: int = 4,
-    seed: int = 0,
-):
-    """
-    Generates training mazes as random spanning trees over a grid graph.
-    For each sample, build an n x n grid and sample a spanning tree.
-    """
-    return [_build_maze_tree_graph(grid_size, seed + i) for i in range(n_samples)]
-
-
-### === PLOTTING SECTION (CAN BE EXCLUDED FOR SUBMISSION) === ###
+### === PLOTTING SECTION === ###
 def plot_path_predictions(
     model: torch.nn.Module,
     dataset,
@@ -259,42 +191,6 @@ def eval_model(model, dataloader):
     return f"node accuracy: {acc/tot_nodes:.3f} | node f1 score: {f1score:.3f} | graph accuracy: {perf/tot_graphs:.3}"
 
 
-def _eval_model_metrics(model, dataloader):
-    model.eval()
-    node_acc = 0
-    tot_nodes = 0
-    tot_graphs = 0
-    perf = 0
-    gpred = []
-    gsol = []
-
-    for batch in dataloader:
-        n = len(batch.x) / batch.num_graphs
-        with torch.no_grad():
-            batch = batch.to(device)
-            pred = model(batch, int(n))
-
-        y_pred = torch.argmax(pred, dim=1)
-        tot_nodes += len(batch.x)
-        tot_graphs += batch.num_graphs
-
-        graph_acc = torch.sum(y_pred == batch.y).item()
-        node_acc += graph_acc
-        gpred.extend([int(p.item()) for p in y_pred])
-        gsol.extend([int(p.item()) for p in batch.y])
-        if graph_acc == n:
-            perf += 1
-
-    gpred = torch.tensor(gpred)
-    gsol = torch.tensor(gsol)
-    f1score = f1_score(gpred, gsol)
-    return {
-        "node_accuracy": node_acc / tot_nodes,
-        "node_f1": f1score,
-        "graph_accuracy": perf / tot_graphs,
-    }
-
-
 def _fit_model(model, dataset, epochs=20, lr=4e-4):
     criterion = torch.nn.NLLLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -344,15 +240,83 @@ def init_model() -> torch.nn.Module:
 
 # Do not change function signature
 def train_model(model: torch.nn.Module, train_dataset: Dataset[Any]) -> torch.nn.Module:
-    if train_dataset is None or len(train_dataset) == 0:
-        dataset = train_dataset_gen(n_samples=200, grid_size=4, seed=0)
-    else:
-        dataset = list(train_dataset)
 
     model = model.to(device)
-    best_model = _fit_model(model, dataset, epochs=EPOCHS, lr=4e-4)
-    plot_path_predictions(best_model, dataset, n_graphs=min(20, len(dataset)))
+    best_model = _fit_model(model, train_dataset, epochs=EPOCHS, lr=4e-4)
+    plot_path_predictions(best_model, train_dataset, n_graphs=min(20, len(train_dataset)))
     return best_model
+
+
+# ====================================================================================
+# ====================================================================================
+# ====================================================================================
+### === LOCAL EVALUATION && GET DATA FUNCTION (CAN BE EXCLUDED FOR SUBMISSION) === ###
+### === DATASET GENERATION === ###
+def _build_maze_tree_graph(grid_size: int, seed: int):
+    grid_graph = nx.grid_2d_graph(grid_size, grid_size)
+    rng = random.Random(seed)
+
+    def to_id(node):
+        r, c = node
+        return r * grid_size + c
+
+    # Randomize edge weights, then take MST => random spanning tree on grid.
+    for u, v in grid_graph.edges():
+        grid_graph[u][v]["w"] = rng.random()
+    nx_tree_2d = nx.minimum_spanning_tree(grid_graph, weight="w")
+
+    # Safety checks: one connected tree spanning all nodes.
+    if not nx.is_tree(nx_tree_2d):
+        raise ValueError("Generated maze graph is not a valid spanning tree.")
+    if nx.number_connected_components(nx_tree_2d) != 1:
+        raise ValueError("Generated maze graph has disconnected components.")
+
+    for u, v in nx_tree_2d.edges():
+        if abs(u[0] - v[0]) + abs(u[1] - v[1]) != 1:
+            raise ValueError("Invalid edge in maze tree: non-neighbor nodes connected.")
+
+    relabel_map = {node: to_id(node) for node in nx_tree_2d.nodes()}
+    nx_graph = nx.relabel_nodes(nx_tree_2d, relabel_map)
+    num_nodes = grid_size * grid_size
+    if num_nodes > 1:
+        if min(dict(nx_graph.degree()).values()) < 1:
+            raise ValueError("Generated maze graph has isolated nodes.")
+        if nx_graph.number_of_edges() != num_nodes - 1:
+            raise ValueError("Generated maze graph does not have N-1 edges.")
+
+    torch_rng = torch.Generator().manual_seed(seed)
+    endpoints = torch.randperm(num_nodes, generator=torch_rng)[:2].tolist()
+    source, target = endpoints[0], endpoints[1]
+    path_nodes = set(nx.shortest_path(nx_graph, source=source, target=target))
+
+    # Input features: one-hot encoding of source and target nodes
+    graph = from_networkx(nx_graph)
+    graph.x = torch.zeros(num_nodes, 2, dtype=torch.float32)
+    graph.x[source, 0] = 1.0
+    graph.x[target, 1] = 1.0
+
+    # Labels: 1 for nodes on the path, 0 otherwise
+    graph.y = torch.zeros(num_nodes, dtype=torch.long)
+    for node in path_nodes:
+        graph.y[node] = 1
+
+    graph.source = source
+    graph.target = target
+    graph.grid_size = grid_size
+    graph.path_nodes = torch.tensor(sorted(path_nodes), dtype=torch.long)
+    return graph
+
+
+def train_dataset_gen(
+    n_samples: int = 200,
+    grid_size: int = 4,
+    seed: int = 0,
+):
+    """
+    Generates training mazes as random spanning trees over a grid graph.
+    For each sample, build an n x n grid and sample a spanning tree.
+    """
+    return [_build_maze_tree_graph(grid_size, seed + i) for i in range(n_samples)]
 
 
 def get_data():
@@ -363,6 +327,42 @@ def get_data():
     train_dataset = train_dataset_gen(n_samples=200, grid_size=4, seed=SEED)
     test_dataset = []
     return train_dataset, test_dataset
+
+
+def _eval_model_metrics(model, dataloader):
+    model.eval()
+    node_acc = 0
+    tot_nodes = 0
+    tot_graphs = 0
+    perf = 0
+    gpred = []
+    gsol = []
+
+    for batch in dataloader:
+        n = len(batch.x) / batch.num_graphs
+        with torch.no_grad():
+            batch = batch.to(device)
+            pred = model(batch, int(n))
+
+        y_pred = torch.argmax(pred, dim=1)
+        tot_nodes += len(batch.x)
+        tot_graphs += batch.num_graphs
+
+        graph_acc = torch.sum(y_pred == batch.y).item()
+        node_acc += graph_acc
+        gpred.extend([int(p.item()) for p in y_pred])
+        gsol.extend([int(p.item()) for p in batch.y])
+        if graph_acc == n:
+            perf += 1
+
+    gpred = torch.tensor(gpred)
+    gsol = torch.tensor(gsol)
+    f1score = f1_score(gpred, gsol)
+    return {
+        "node_accuracy": node_acc / tot_nodes,
+        "node_f1": f1score,
+        "graph_accuracy": perf / tot_graphs,
+    }
 
 
 def evaluate_model(model: torch.nn.Module, test_dataset):
