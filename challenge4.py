@@ -1,24 +1,27 @@
+"""Maze path prediction with a message-passing GNN.
+
+Project context:
+- Deep Learning Course ETH
+- Graph Neural Networks
+"""
+
 import random
 from copy import deepcopy
+from math import ceil
 from pathlib import Path
 from typing import Any
 
-# ===== NN / Training Runtime Imports =====
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import f1_score
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, MessagePassing, SAGEConv
+from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import from_networkx, to_networkx
-from math import ceil
-
-# ===== Auxiliary / Plotting Imports =====
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DO_PLOTS = True
@@ -31,7 +34,6 @@ if torch.cuda.is_available():
   torch.cuda.manual_seed_all(SEED)
 
 
-### === PLOTTING SECTION === ###
 def plot_path_predictions(
     model: torch.nn.Module,
     dataset,
@@ -106,7 +108,6 @@ def plot_path_predictions(
             plt.close()
 
 
-### === NN FUNCTIONS === ###
 class MazeConv(MessagePassing):
     def __init__(self, hidden_dim: int, aggr: str = "add"):
         super().__init__(aggr=aggr)
@@ -133,43 +134,40 @@ class MazeConv(MessagePassing):
 
 
 class MazeGNN(torch.nn.Module):
-    def __init__(self, hidden_dim: int =64, dropout: float = 0.2, aggr: str = "add"):
+    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2, aggr: str = "add"):
         super().__init__()
-                
+
         self.dropout = dropout
-        self.encoder = self.get_mlp(2, hidden_dim, 2*hidden_dim,last_relu=True)
-        self.input_memory = self.get_mlp(4 * hidden_dim, 2*hidden_dim, 2*hidden_dim, last_relu=True)
-        self.conv1 = MazeConv(2*hidden_dim, aggr=aggr)
-        # self.conv2 = MazeConv(hidden_dim)
-        # self.conv3 = MazeConv(hidden_dim)
-        self.decoder = self.get_mlp(2*hidden_dim, hidden_dim, 2, last_relu=False)
+        self.encoder = self.get_mlp(2, hidden_dim, 2 * hidden_dim, last_relu=True)
+        self.input_memory = self.get_mlp(4 * hidden_dim, 2 * hidden_dim, 2 * hidden_dim, last_relu=True)
+        self.conv = MazeConv(2 * hidden_dim, aggr=aggr)
+        self.decoder = self.get_mlp(2 * hidden_dim, hidden_dim, 2, last_relu=False)
 
     def forward(self, data, num_nodes):
         x, edge_index = data.x, data.edge_index
         x = self.encoder(x)
         encoded_input = x
 
-        for i in range(ceil(3 * np.sqrt(num_nodes))):
+        for _ in range(ceil(3 * np.sqrt(num_nodes))):
             x = self.input_memory(torch.cat([encoded_input, x], dim=-1))
-            # x = self.conv3(self.conv2(self.conv1(x, edge_index),edge_index),edge_index)
-            x = self.conv1(x,edge_index)
+            x = self.conv(x, edge_index)
 
         x = self.decoder(x)
         return F.log_softmax(x, dim=1)
 
     def get_mlp(self, input_dim, hidden_dim, output_dim, last_relu=True):
         modules = [
-            torch.nn.Linear(input_dim, int(hidden_dim)), 
-            torch.nn.ReLU(), 
-            torch.nn.Dropout(self.dropout), 
-            torch.nn.BatchNorm1d(hidden_dim),            
-            torch.nn.Linear(int(hidden_dim), output_dim)]
+            torch.nn.Linear(input_dim, int(hidden_dim)),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(self.dropout),
+            torch.nn.BatchNorm1d(hidden_dim),
+            torch.nn.Linear(int(hidden_dim), output_dim),
+        ]
         if last_relu:
             modules.append(torch.nn.ReLU())
         return torch.nn.Sequential(*modules)
 
 
-### === TRAINING FUNCTIONS === ###
 def eval_model(model, dataloader):
     model.eval()
     acc = 0
@@ -241,16 +239,18 @@ def _fit_model(model, dataset, epochs=20, lr=4e-4):
             best_model = deepcopy(model)
             print("Stored new best model:", score)
 
+        if running_loss < 1e-3:
+            print(f"Early stopping at epoch {epoch + 1}: running_loss={running_loss:.8f}")
+            break
+
     return best_model
 
 
-# Do not change function signature
 def init_model() -> torch.nn.Module:
     model = MazeGNN().to(device)
     return model
 
 
-# Do not change function signature
 def train_model(model: torch.nn.Module, train_dataset: Dataset[Any]) -> torch.nn.Module:
 
     model = model.to(device)
@@ -259,11 +259,6 @@ def train_model(model: torch.nn.Module, train_dataset: Dataset[Any]) -> torch.nn
     return best_model
 
 
-# ====================================================================================
-# ====================================================================================
-# ====================================================================================
-### === LOCAL EVALUATION && GET DATA FUNCTION (CAN BE EXCLUDED FOR SUBMISSION) === ###
-### === DATASET GENERATION === ###
 def _build_maze_tree_graph(grid_size: int, seed: int):
     grid_graph = nx.grid_2d_graph(grid_size, grid_size)
     rng = random.Random(seed)
@@ -408,24 +403,14 @@ def evaluate_model(model: torch.nn.Module, test_dataset):
     return results
 
 
-# This is what is being called by the grader
 def run():
-  random.seed(42)
-
-  # Get datasets for training and testing
-  train_dataset, test_dataset = get_data()
-
-  # Initialize the model using student's init_model function
-  model = init_model()
-
-  # Train the model using student's train_model function
-  model = train_model(model, train_dataset)
-
-  # Evaluate the model on the test set
-  model.eval()  # Set the model to evaluation mode
-  score = evaluate_model(model, test_dataset)
-  
-  return score
+    random.seed(42)
+    train_dataset, test_dataset = get_data()
+    model = init_model()
+    model = train_model(model, train_dataset)
+    model.eval()
+    score = evaluate_model(model, test_dataset)
+    return score
 
 
 if __name__ == "__main__":
