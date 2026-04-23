@@ -21,6 +21,7 @@ import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DO_PLOTS = True
+EPOCHS = 20
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -30,23 +31,57 @@ if torch.cuda.is_available():
 
 
 ### === DATASET GENERATION === ###
-def _build_maze_tree_graph(num_nodes: int, seed: int):
-    nx_graph = nx.random_labeled_tree(n=num_nodes, seed=seed)
-    endpoints = torch.randperm(num_nodes)[:2].tolist()
+def _build_maze_tree_graph(grid_size: int, seed: int):
+    grid_graph = nx.grid_2d_graph(grid_size, grid_size)
+    rng = random.Random(seed)
+
+    def to_id(node):
+        r, c = node
+        return r * grid_size + c
+
+    # Randomize edge weights, then take MST => random spanning tree on grid.
+    for u, v in grid_graph.edges():
+        grid_graph[u][v]["w"] = rng.random()
+    nx_tree_2d = nx.minimum_spanning_tree(grid_graph, weight="w")
+
+    # Safety checks: one connected tree spanning all nodes.
+    if not nx.is_tree(nx_tree_2d):
+        raise ValueError("Generated maze graph is not a valid spanning tree.")
+    if nx.number_connected_components(nx_tree_2d) != 1:
+        raise ValueError("Generated maze graph has disconnected components.")
+
+    for u, v in nx_tree_2d.edges():
+        if abs(u[0] - v[0]) + abs(u[1] - v[1]) != 1:
+            raise ValueError("Invalid edge in maze tree: non-neighbor nodes connected.")
+
+    relabel_map = {node: to_id(node) for node in nx_tree_2d.nodes()}
+    nx_graph = nx.relabel_nodes(nx_tree_2d, relabel_map)
+    num_nodes = grid_size * grid_size
+    if num_nodes > 1:
+        if min(dict(nx_graph.degree()).values()) < 1:
+            raise ValueError("Generated maze graph has isolated nodes.")
+        if nx_graph.number_of_edges() != num_nodes - 1:
+            raise ValueError("Generated maze graph does not have N-1 edges.")
+
+    torch_rng = torch.Generator().manual_seed(seed)
+    endpoints = torch.randperm(num_nodes, generator=torch_rng)[:2].tolist()
     source, target = endpoints[0], endpoints[1]
     path_nodes = set(nx.shortest_path(nx_graph, source=source, target=target))
 
+    # Input features: one-hot encoding of source and target nodes
     graph = from_networkx(nx_graph)
     graph.x = torch.zeros(num_nodes, 2, dtype=torch.float32)
     graph.x[source, 0] = 1.0
     graph.x[target, 1] = 1.0
 
+    # Labels: 1 for nodes on the path, 0 otherwise
     graph.y = torch.zeros(num_nodes, dtype=torch.long)
     for node in path_nodes:
         graph.y[node] = 1
 
     graph.source = source
     graph.target = target
+    graph.grid_size = grid_size
     graph.path_nodes = torch.tensor(sorted(path_nodes), dtype=torch.long)
     return graph
 
@@ -57,12 +92,10 @@ def train_dataset_gen(
     seed: int = 0,
 ):
     """
-    Generates training mazes as graphs.
-    Training is intentionally restricted to 4x4 mazes by default.
+    Generates training mazes as random spanning trees over a grid graph.
+    For each sample, build an n x n grid and sample a spanning tree.
     """
-    assert grid_size == 4, "Challenge constraint: train only on 4x4 graphs."
-    num_nodes = grid_size * grid_size
-    return [_build_maze_tree_graph(num_nodes, seed + i) for i in range(n_samples)]
+    return [_build_maze_tree_graph(grid_size, seed + i) for i in range(n_samples)]
 
 
 ### === PLOTTING SECTION (CAN BE EXCLUDED FOR SUBMISSION) === ###
@@ -89,19 +122,51 @@ def plot_path_predictions(
             pred_mask = torch.argmax(pred_logits, dim=1).cpu().numpy()
 
             nx_graph = to_networkx(data, to_undirected=True)
-            pos = nx.spring_layout(nx_graph, seed=7)
+            nodelist = sorted(nx_graph.nodes())
 
-            true_colors = ["tab:orange" if int(v) == 1 else "lightgray" for v in data.y.tolist()]
-            pred_colors = ["tab:blue" if int(v) == 1 else "lightgray" for v in pred_mask.tolist()]
+            grid_size = int(getattr(data, "grid_size", int(np.sqrt(data.num_nodes))))
+            pos = {
+                node: (node % grid_size, -(node // grid_size))
+                for node in nodelist
+            }
+
+            # Draw exactly the stored maze connectivity.
+            draw_edges = list(nx_graph.edges())
+
+            true_mask = data.y.cpu().numpy()
+            true_colors = [
+                "tab:orange" if int(true_mask[node]) == 1 else "lightgray"
+                for node in nodelist
+            ]
+            pred_colors = [
+                "tab:blue" if int(pred_mask[node]) == 1 else "lightgray"
+                for node in nodelist
+            ]
 
             plt.figure(figsize=(11, 5))
             plt.subplot(1, 2, 1)
             plt.title("True path (DFS / shortest path)")
-            nx.draw(nx_graph, pos=pos, node_color=true_colors, with_labels=False, node_size=70)
+            nx.draw(
+                nx_graph,
+                pos=pos,
+                nodelist=nodelist,
+                edgelist=draw_edges,
+                node_color=true_colors,
+                with_labels=False,
+                node_size=70,
+            )
 
             plt.subplot(1, 2, 2)
             plt.title("GNN prediction")
-            nx.draw(nx_graph, pos=pos, node_color=pred_colors, with_labels=False, node_size=70)
+            nx.draw(
+                nx_graph,
+                pos=pos,
+                nodelist=nodelist,
+                edgelist=draw_edges,
+                node_color=pred_colors,
+                with_labels=False,
+                node_size=70,
+            )
 
             plt.tight_layout()
             plt.savefig(output_path / f"path_{idx:03d}.png")
@@ -249,7 +314,7 @@ def train_model(model: torch.nn.Module, train_dataset: Dataset[Any]) -> torch.nn
         dataset = list(train_dataset)
 
     model = model.to(device)
-    best_model = _fit_model(model, dataset, epochs=20, lr=4e-4)
+    best_model = _fit_model(model, dataset, epochs=EPOCHS, lr=4e-4)
     plot_path_predictions(best_model, dataset, n_graphs=min(20, len(dataset)))
     return best_model
 
