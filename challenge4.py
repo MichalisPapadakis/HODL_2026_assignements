@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, MessagePassing, SAGEConv
 from torch_geometric.utils import from_networkx, to_networkx
+from math import ceil
 
 # ===== Auxiliary / Plotting Imports =====
 import matplotlib.pyplot as plt
@@ -21,7 +22,7 @@ import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DO_PLOTS = True
-EPOCHS = 20
+EPOCHS = 30
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -108,50 +109,58 @@ def plot_path_predictions(
 ### === NN FUNCTIONS === ###
 class MazeConv(MessagePassing):
     def __init__(self, hidden_dim: int):
-        super().__init__(aggr="add")
+        super().__init__(aggr="min")
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * hidden_dim, hidden_dim),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
         )
         self.update_mlp = torch.nn.Sequential(
-            torch.nn.Linear(2 * hidden_dim, hidden_dim),
+            torch.nn.Linear( hidden_dim, hidden_dim),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
         )
 
+        self.norm = torch.nn.BatchNorm1d(hidden_dim)
+
     def forward(self, x, edge_index):
         msg = self.propagate(edge_index, x=x)
-        return self.update_mlp(torch.cat([x, msg], dim=-1))
+        return self.norm(x+ self.update_mlp(msg))
 
     def message(self, x_j, x_i):
         return self.message_mlp(torch.cat([x_i, x_j], dim=-1))
 
 
 class MazeGNN(torch.nn.Module):
-    def __init__(self, hidden_dim: int = 32, n_layers: int = 6, dropout: float = 0.1):
+    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2):
         super().__init__()
+                
         self.dropout = dropout
-        self.encoder = self.get_mlp(2, hidden_dim, hidden_dim)
-        self.convs = torch.nn.ModuleList([MazeConv(hidden_dim) for _ in range(n_layers)])
-        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=False)
+        self.encoder = self.get_mlp(2, hidden_dim, hidden_dim,last_relu=True)
+        self.conv1 = MazeConv(hidden_dim)
+        self.conv2 = MazeConv(hidden_dim)
+        self.conv3 = MazeConv(hidden_dim)
+        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=True)
 
     def forward(self, data, num_nodes):
-        del num_nodes
         x, edge_index = data.x, data.edge_index
         x = self.encoder(x)
-        for conv in self.convs:
-            x = x + conv(x, edge_index)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+
+        for i in range(ceil(num_nodes**0.5)):
+            x = self.conv3(self.conv2(self.conv1(x, edge_index),edge_index),edge_index)
+
         x = self.decoder(x)
         return F.log_softmax(x, dim=1)
 
     def get_mlp(self, input_dim, hidden_dim, output_dim, last_relu=True):
         modules = [
-            torch.nn.Linear(input_dim, int(hidden_dim)),
-            torch.nn.ReLU(),
-            torch.nn.Linear(int(hidden_dim), output_dim),
-        ]
+            torch.nn.Linear(input_dim, int(hidden_dim)), 
+            torch.nn.ReLU(), 
+            torch.nn.Dropout(self.dropout),             
+            # torch.nn.Linear( int(hidden_dim), int(hidden_dim)), 
+            # torch.nn.ReLU(), 
+            # torch.nn.Dropout(self.dropout), 
+            torch.nn.Linear(int(hidden_dim), output_dim)]
         if last_relu:
             modules.append(torch.nn.ReLU())
         return torch.nn.Sequential(*modules)
@@ -168,7 +177,7 @@ def eval_model(model, dataloader):
     gsol = []
 
     for batch in dataloader:
-        n = len(batch.x) / batch.num_graphs
+        n = len(batch.x)
         with torch.no_grad():
             batch = batch.to(device)
             pred = model(batch, int(n))
@@ -339,7 +348,7 @@ def _eval_model_metrics(model, dataloader):
     gsol = []
 
     for batch in dataloader:
-        n = len(batch.x) / batch.num_graphs
+        n = len(batch.x)
         with torch.no_grad():
             batch = batch.to(device)
             pred = model(batch, int(n))
