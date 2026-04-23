@@ -113,19 +113,20 @@ class MazeConv(MessagePassing):
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * hidden_dim, hidden_dim),
             torch.nn.ReLU(),
+            torch.nn.BatchNorm1d(hidden_dim),
             torch.nn.Linear(hidden_dim, hidden_dim),
         )
         self.update_mlp = torch.nn.Sequential(
             torch.nn.Linear( hidden_dim, hidden_dim),
             torch.nn.ReLU(),
+            torch.nn.BatchNorm1d(hidden_dim),
             torch.nn.Linear(hidden_dim, hidden_dim),
         )
-
         self.norm = torch.nn.BatchNorm1d(hidden_dim)
 
     def forward(self, x, edge_index):
         msg = self.propagate(edge_index, x=x)
-        return self.norm(x+ self.update_mlp(msg))
+        return self.norm(x + self.update_mlp(msg))
 
     def message(self, x_j, x_i):
         return self.message_mlp(torch.cat([x_i, x_j], dim=-1))
@@ -138,16 +139,17 @@ class MazeGNN(torch.nn.Module):
         self.dropout = dropout
         self.encoder = self.get_mlp(2, hidden_dim, hidden_dim,last_relu=True)
         self.conv1 = MazeConv(hidden_dim)
-        self.conv2 = MazeConv(hidden_dim)
-        self.conv3 = MazeConv(hidden_dim)
-        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=True)
+        # self.conv2 = MazeConv(hidden_dim)
+        # self.conv3 = MazeConv(hidden_dim)
+        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=False)
 
     def forward(self, data, num_nodes):
         x, edge_index = data.x, data.edge_index
         x = self.encoder(x)
 
-        for i in range(ceil(num_nodes**0.5)):
-            x = self.conv3(self.conv2(self.conv1(x, edge_index),edge_index),edge_index)
+        for i in range(ceil(3 * np.sqrt(num_nodes))):
+            # x = self.conv3(self.conv2(self.conv1(x, edge_index),edge_index),edge_index)
+            x = self.conv1(x,edge_index)
 
         x = self.decoder(x)
         return F.log_softmax(x, dim=1)
@@ -156,10 +158,8 @@ class MazeGNN(torch.nn.Module):
         modules = [
             torch.nn.Linear(input_dim, int(hidden_dim)), 
             torch.nn.ReLU(), 
-            torch.nn.Dropout(self.dropout),             
-            # torch.nn.Linear( int(hidden_dim), int(hidden_dim)), 
-            # torch.nn.ReLU(), 
-            # torch.nn.Dropout(self.dropout), 
+            torch.nn.Dropout(self.dropout), 
+            torch.nn.BatchNorm1d(hidden_dim),            
             torch.nn.Linear(int(hidden_dim), output_dim)]
         if last_relu:
             modules.append(torch.nn.ReLU())
@@ -380,7 +380,7 @@ def evaluate_model(model: torch.nn.Module, test_dataset):
     results = {}
 
     for size in size_buckets:
-        dataset = train_dataset_gen(n_samples=200, grid_size=size, seed=SEED + 1000 * size)
+        dataset = train_dataset_gen(n_samples=50, grid_size=size, seed=SEED + 1000 * size)
         dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
         metrics = _eval_model_metrics(model, dataloader)
         results[size] = metrics
