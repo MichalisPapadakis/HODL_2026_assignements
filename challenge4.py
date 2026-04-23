@@ -22,7 +22,7 @@ import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DO_PLOTS = True
-EPOCHS = 30
+EPOCHS = 50
 SEED = 42
 random.seed(SEED)
 torch.manual_seed(SEED)
@@ -108,7 +108,7 @@ def plot_path_predictions(
 
 ### === NN FUNCTIONS === ###
 class MazeConv(MessagePassing):
-    def __init__(self, hidden_dim: int, aggr: str = "min"):
+    def __init__(self, hidden_dim: int, aggr: str = "add"):
         super().__init__(aggr=aggr)
         self.message_mlp = torch.nn.Sequential(
             torch.nn.Linear(2 * hidden_dim, hidden_dim),
@@ -133,21 +133,24 @@ class MazeConv(MessagePassing):
 
 
 class MazeGNN(torch.nn.Module):
-    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2, aggr: str = "min"):
+    def __init__(self, hidden_dim: int =64, dropout: float = 0.2, aggr: str = "add"):
         super().__init__()
                 
         self.dropout = dropout
-        self.encoder = self.get_mlp(2, hidden_dim, hidden_dim,last_relu=True)
-        self.conv1 = MazeConv(hidden_dim, aggr=aggr)
+        self.encoder = self.get_mlp(2, hidden_dim, 2*hidden_dim,last_relu=True)
+        self.input_memory = self.get_mlp(4 * hidden_dim, 2*hidden_dim, 2*hidden_dim, last_relu=True)
+        self.conv1 = MazeConv(2*hidden_dim, aggr=aggr)
         # self.conv2 = MazeConv(hidden_dim)
         # self.conv3 = MazeConv(hidden_dim)
-        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=False)
+        self.decoder = self.get_mlp(2*hidden_dim, hidden_dim, 2, last_relu=False)
 
     def forward(self, data, num_nodes):
         x, edge_index = data.x, data.edge_index
         x = self.encoder(x)
+        encoded_input = x
 
         for i in range(ceil(3 * np.sqrt(num_nodes))):
+            x = self.input_memory(torch.cat([encoded_input, x], dim=-1))
             # x = self.conv3(self.conv2(self.conv1(x, edge_index),edge_index),edge_index)
             x = self.conv1(x,edge_index)
 
@@ -333,7 +336,7 @@ def get_data():
     Local fallback so run() works standalone.
     Grader environments may replace this with their own loader.
     """
-    train_dataset = train_dataset_gen(n_samples=200, grid_size=4, seed=SEED)
+    train_dataset = train_dataset_gen(n_samples=400, grid_size=4, seed=SEED)
     test_dataset = []
     return train_dataset, test_dataset
 
