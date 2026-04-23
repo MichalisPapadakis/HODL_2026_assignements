@@ -259,6 +259,42 @@ def eval_model(model, dataloader):
     return f"node accuracy: {acc/tot_nodes:.3f} | node f1 score: {f1score:.3f} | graph accuracy: {perf/tot_graphs:.3}"
 
 
+def _eval_model_metrics(model, dataloader):
+    model.eval()
+    node_acc = 0
+    tot_nodes = 0
+    tot_graphs = 0
+    perf = 0
+    gpred = []
+    gsol = []
+
+    for batch in dataloader:
+        n = len(batch.x) / batch.num_graphs
+        with torch.no_grad():
+            batch = batch.to(device)
+            pred = model(batch, int(n))
+
+        y_pred = torch.argmax(pred, dim=1)
+        tot_nodes += len(batch.x)
+        tot_graphs += batch.num_graphs
+
+        graph_acc = torch.sum(y_pred == batch.y).item()
+        node_acc += graph_acc
+        gpred.extend([int(p.item()) for p in y_pred])
+        gsol.extend([int(p.item()) for p in batch.y])
+        if graph_acc == n:
+            perf += 1
+
+    gpred = torch.tensor(gpred)
+    gsol = torch.tensor(gsol)
+    f1score = f1_score(gpred, gsol)
+    return {
+        "node_accuracy": node_acc / tot_nodes,
+        "node_f1": f1score,
+        "graph_accuracy": perf / tot_graphs,
+    }
+
+
 def _fit_model(model, dataset, epochs=20, lr=4e-4):
     criterion = torch.nn.NLLLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -329,6 +365,37 @@ def get_data():
     return train_dataset, test_dataset
 
 
+def evaluate_model(model: torch.nn.Module, test_dataset):
+    del test_dataset
+    size_buckets = [4, 8, 16, 32]
+    results = {}
+
+    for size in size_buckets:
+        dataset = train_dataset_gen(n_samples=200, grid_size=size, seed=SEED + 1000 * size)
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+        metrics = _eval_model_metrics(model, dataloader)
+        results[size] = metrics
+
+        plot_path_predictions(
+            model,
+            dataset,
+            n_graphs=20,
+            out_dir=f"generated_paths/{size}",
+        )
+
+    print("Evaluation on test-size categories:")
+    for size in size_buckets:
+        m = results[size]
+        print(
+            f"{size}x{size} -> "
+            f"node accuracy: {m['node_accuracy']:.3f} | "
+            f"node f1 score: {m['node_f1']:.3f} | "
+            f"graph accuracy: {m['graph_accuracy']:.3f}"
+        )
+
+    return results
+
+
 # This is what is being called by the grader
 def run():
   random.seed(42)
@@ -344,9 +411,9 @@ def run():
 
   # Evaluate the model on the test set
   model.eval()  # Set the model to evaluation mode
-#   score = evaluate_model(model, test_dataset)
+  score = evaluate_model(model, test_dataset)
   
-#   return score
+  return score
 
 
 if __name__ == "__main__":
