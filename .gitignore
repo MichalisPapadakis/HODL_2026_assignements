@@ -3,3 +3,6 @@ data_scratch/
 test.py
 __pycache__/
 checkpoints/
+generated_paths/
+template_solution.py
+fine_tuning_template.py

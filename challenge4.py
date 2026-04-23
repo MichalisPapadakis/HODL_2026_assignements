@@ -1,0 +1,288 @@
+import random
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+# ===== NN / Training Runtime Imports =====
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from sklearn.metrics import f1_score
+from torch.utils.data import Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv, MessagePassing, SAGEConv
+from torch_geometric.utils import from_networkx, to_networkx
+
+# ===== Auxiliary / Plotting Imports =====
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DO_PLOTS = True
+SEED = 42
+random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+  torch.cuda.manual_seed(SEED)
+  torch.cuda.manual_seed_all(SEED)
+
+
+### === DATASET GENERATION === ###
+def _build_maze_tree_graph(num_nodes: int, seed: int):
+    nx_graph = nx.random_labeled_tree(n=num_nodes, seed=seed)
+    endpoints = torch.randperm(num_nodes)[:2].tolist()
+    source, target = endpoints[0], endpoints[1]
+    path_nodes = set(nx.shortest_path(nx_graph, source=source, target=target))
+
+    graph = from_networkx(nx_graph)
+    graph.x = torch.zeros(num_nodes, 2, dtype=torch.float32)
+    graph.x[source, 0] = 1.0
+    graph.x[target, 1] = 1.0
+
+    graph.y = torch.zeros(num_nodes, dtype=torch.long)
+    for node in path_nodes:
+        graph.y[node] = 1
+
+    graph.source = source
+    graph.target = target
+    graph.path_nodes = torch.tensor(sorted(path_nodes), dtype=torch.long)
+    return graph
+
+
+def train_dataset_gen(
+    n_samples: int = 200,
+    grid_size: int = 4,
+    seed: int = 0,
+):
+    """
+    Generates training mazes as graphs.
+    Training is intentionally restricted to 4x4 mazes by default.
+    """
+    assert grid_size == 4, "Challenge constraint: train only on 4x4 graphs."
+    num_nodes = grid_size * grid_size
+    return [_build_maze_tree_graph(num_nodes, seed + i) for i in range(n_samples)]
+
+
+### === PLOTTING SECTION (CAN BE EXCLUDED FOR SUBMISSION) === ###
+def plot_path_predictions(
+    model: torch.nn.Module,
+    dataset,
+    n_graphs: int = 20,
+    out_dir: str = "generated_paths",
+) -> None:
+    if not DO_PLOTS:
+        return
+
+    output_path = Path(out_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+    max_graphs = min(n_graphs, len(dataset))
+
+    with torch.no_grad():
+        for idx in range(max_graphs):
+            data = dataset[idx]
+            batch = data.to(device)
+            pred_logits = model(batch, batch.num_nodes)
+            pred_mask = torch.argmax(pred_logits, dim=1).cpu().numpy()
+
+            nx_graph = to_networkx(data, to_undirected=True)
+            pos = nx.spring_layout(nx_graph, seed=7)
+
+            true_colors = ["tab:orange" if int(v) == 1 else "lightgray" for v in data.y.tolist()]
+            pred_colors = ["tab:blue" if int(v) == 1 else "lightgray" for v in pred_mask.tolist()]
+
+            plt.figure(figsize=(11, 5))
+            plt.subplot(1, 2, 1)
+            plt.title("True path (DFS / shortest path)")
+            nx.draw(nx_graph, pos=pos, node_color=true_colors, with_labels=False, node_size=70)
+
+            plt.subplot(1, 2, 2)
+            plt.title("GNN prediction")
+            nx.draw(nx_graph, pos=pos, node_color=pred_colors, with_labels=False, node_size=70)
+
+            plt.tight_layout()
+            plt.savefig(output_path / f"path_{idx:03d}.png")
+            plt.close()
+
+
+### === NN FUNCTIONS === ###
+class MazeConv(MessagePassing):
+    def __init__(self, hidden_dim: int):
+        super().__init__(aggr="add")
+        self.message_mlp = torch.nn.Sequential(
+            torch.nn.Linear(2 * hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.update_mlp = torch.nn.Sequential(
+            torch.nn.Linear(2 * hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, x, edge_index):
+        msg = self.propagate(edge_index, x=x)
+        return self.update_mlp(torch.cat([x, msg], dim=-1))
+
+    def message(self, x_j, x_i):
+        return self.message_mlp(torch.cat([x_i, x_j], dim=-1))
+
+
+class MazeGNN(torch.nn.Module):
+    def __init__(self, hidden_dim: int = 32, n_layers: int = 6, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = dropout
+        self.encoder = self.get_mlp(2, hidden_dim, hidden_dim)
+        self.convs = torch.nn.ModuleList([MazeConv(hidden_dim) for _ in range(n_layers)])
+        self.decoder = self.get_mlp(hidden_dim, hidden_dim, 2, last_relu=False)
+
+    def forward(self, data, num_nodes):
+        del num_nodes
+        x, edge_index = data.x, data.edge_index
+        x = self.encoder(x)
+        for conv in self.convs:
+            x = x + conv(x, edge_index)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.decoder(x)
+        return F.log_softmax(x, dim=1)
+
+    def get_mlp(self, input_dim, hidden_dim, output_dim, last_relu=True):
+        modules = [
+            torch.nn.Linear(input_dim, int(hidden_dim)),
+            torch.nn.ReLU(),
+            torch.nn.Linear(int(hidden_dim), output_dim),
+        ]
+        if last_relu:
+            modules.append(torch.nn.ReLU())
+        return torch.nn.Sequential(*modules)
+
+
+### === TRAINING FUNCTIONS === ###
+def eval_model(model, dataloader):
+    model.eval()
+    acc = 0
+    tot_nodes = 0
+    tot_graphs = 0
+    perf = 0
+    gpred = []
+    gsol = []
+
+    for batch in dataloader:
+        n = len(batch.x) / batch.num_graphs
+        with torch.no_grad():
+            batch = batch.to(device)
+            pred = model(batch, int(n))
+
+        y_pred = torch.argmax(pred, dim=1)
+        tot_nodes += len(batch.x)
+        tot_graphs += batch.num_graphs
+
+        graph_acc = torch.sum(y_pred == batch.y).item()
+        acc += graph_acc
+        gpred.extend([int(p.item()) for p in y_pred])
+        gsol.extend([int(p.item()) for p in batch.y])
+
+        if graph_acc == n:
+            perf += 1
+
+    gpred = torch.tensor(gpred)
+    gsol = torch.tensor(gsol)
+    f1score = f1_score(gpred, gsol)
+    return f"node accuracy: {acc/tot_nodes:.3f} | node f1 score: {f1score:.3f} | graph accuracy: {perf/tot_graphs:.3}"
+
+
+def _fit_model(model, dataset, epochs=20, lr=4e-4):
+    criterion = torch.nn.NLLLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    val_split = 0.2
+    train_size = int((1 - val_split) * len(dataset))
+    train_loader = DataLoader(dataset[:train_size], batch_size=1, shuffle=True)
+    val_loader = DataLoader(dataset[train_size:], batch_size=1, shuffle=False)
+
+    model.train()
+    best_model = deepcopy(model)
+    best_score = None
+
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for data in train_loader:
+            optimizer.zero_grad()
+            data = data.to(device)
+            pred = model(data, data.num_nodes)
+            loss = criterion(pred, data.y.to(torch.long))
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            running_loss += loss.item()
+
+        metrics = eval_model(model, val_loader)
+        graph_val = float(metrics.split("graph accuracy: ")[-1])
+        score = (-graph_val, running_loss)
+        print(
+            f"Epoch: {epoch + 1} "
+            f"loss: {running_loss / max(1, len(train_loader.dataset)):.5f} | {metrics}"
+        )
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_model = deepcopy(model)
+            print("Stored new best model:", score)
+
+    return best_model
+
+
+# Do not change function signature
+def init_model() -> torch.nn.Module:
+    model = MazeGNN().to(device)
+    return model
+
+
+# Do not change function signature
+def train_model(model: torch.nn.Module, train_dataset: Dataset[Any]) -> torch.nn.Module:
+    if train_dataset is None or len(train_dataset) == 0:
+        dataset = train_dataset_gen(n_samples=200, grid_size=4, seed=0)
+    else:
+        dataset = list(train_dataset)
+
+    model = model.to(device)
+    best_model = _fit_model(model, dataset, epochs=20, lr=4e-4)
+    plot_path_predictions(best_model, dataset, n_graphs=min(20, len(dataset)))
+    return best_model
+
+
+def get_data():
+    """
+    Local fallback so run() works standalone.
+    Grader environments may replace this with their own loader.
+    """
+    train_dataset = train_dataset_gen(n_samples=200, grid_size=4, seed=SEED)
+    test_dataset = []
+    return train_dataset, test_dataset
+
+
+# This is what is being called by the grader
+def run():
+  random.seed(42)
+
+  # Get datasets for training and testing
+  train_dataset, test_dataset = get_data()
+
+  # Initialize the model using student's init_model function
+  model = init_model()
+
+  # Train the model using student's train_model function
+  model = train_model(model, train_dataset)
+
+  # Evaluate the model on the test set
+  model.eval()  # Set the model to evaluation mode
+#   score = evaluate_model(model, test_dataset)
+  
+#   return score
+
+
+if __name__ == "__main__":
+    run()
