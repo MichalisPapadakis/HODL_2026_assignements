@@ -1,3 +1,9 @@
+matplotlib
+networkx
+numpy
+scikit-learn
+torch
+torch-geometric
 accelerate==1.13.0
 action-msgs==2.0.3
 action-tutorials-interfaces==0.33.6

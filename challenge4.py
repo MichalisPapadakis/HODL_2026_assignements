@@ -134,7 +134,7 @@ class MazeConv(MessagePassing):
 
 
 class MazeGNN(torch.nn.Module):
-    def __init__(self, hidden_dim: int = 64, dropout: float = 0.2, aggr: str = "add"):
+    def __init__(self, hidden_dim: int = 32, dropout: float = 0.1, aggr: str = "add"):
         super().__init__()
 
         self.dropout = dropout
