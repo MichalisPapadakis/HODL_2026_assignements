@@ -34,6 +34,7 @@ GAMMA = 0.99
 NUM_TRAIN_EPISODES = 2000
 MAX_STEPS_PER_EPISODE = 6000
 PRINT_EVERY = 25
+NUM_TRAJECTORIES_PER_UPDATE = 10
 
 EVAL_EVERY = 200
 NUM_EVAL_EPISODES = 10
@@ -92,7 +93,7 @@ class REINFORCEAgent(nn.Module):
         self.gamma = gamma
         self.action_dim = action_dim
 
-    def act(self, state, epsilon: float = 0.1, greedy: bool = False):
+    def act(self, state, epsilon: float = 0.0, greedy: bool = False):
         """
         Select action from policy.
         - `greedy=True` for deterministic evaluation.
@@ -134,13 +135,11 @@ def policy_loss(log_probs: List[torch.Tensor], discounted_rewards: torch.Tensor)
     return loss
 
 
-def update_policy(agent: REINFORCEAgent, log_probs: List[torch.Tensor], rewards: List[float]) -> None:
-    returns = discount_rewards(rewards, agent.gamma)
-    returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-
-    loss = policy_loss(log_probs, returns)
+def update_policy(agent: REINFORCEAgent, log_probs: List[torch.Tensor], normalized_returns: torch.Tensor) -> None:
+    loss = policy_loss(log_probs, normalized_returns)
     agent.optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(agent.policy.parameters(), 1.0)
     agent.optimizer.step()
 
 
@@ -285,14 +284,31 @@ def train_model(agent, train_env):
 
     episode_rewards: List[float] = []
     eval_points: List[Tuple[int, float]] = []
+    episode_buffer: List[Tuple[List[torch.Tensor], List[float]]] = []
 
     if matplotlib.get_backend().lower() != "agg":
         plt.ion()
 
     for episode in range(1, NUM_TRAIN_EPISODES + 1):
         total_reward, log_probs, rewards, _ = run_episode(train_env, agent, training=True)
-        update_policy(agent, log_probs, rewards)
         episode_rewards.append(total_reward)
+        episode_buffer.append((log_probs, rewards))
+
+        if len(episode_buffer) == NUM_TRAJECTORIES_PER_UPDATE or episode == NUM_TRAIN_EPISODES:
+            all_log_probs: List[torch.Tensor] = []
+            all_returns: List[torch.Tensor] = []
+
+            for trajectory_log_probs, trajectory_rewards in episode_buffer:
+                returns = discount_rewards(trajectory_rewards, agent.gamma)
+                all_log_probs.extend(trajectory_log_probs)
+                all_returns.append(returns)
+
+            if all_log_probs and all_returns:
+                batch_returns = torch.cat(all_returns)
+                batch_returns = (batch_returns - batch_returns.mean()) / (batch_returns.std() + 1e-8)
+                update_policy(agent, all_log_probs, batch_returns)
+
+            episode_buffer = []
 
         if episode % EVAL_EVERY == 0:
             eval_rewards = []
