@@ -34,22 +34,26 @@ NUM_TRAIN_EPISODES = 400
 MAX_STEPS_PER_EPISODE = 250
 PRINT_EVERY = 25
 NUM_TRAJECTORIES_PER_UPDATE = 8
+LR_STAGE_1_THRESHOLD = 15.0
+LR_STAGE_2_THRESHOLD = 25.0
+LR_STAGE_1 = 2e-4
+LR_STAGE_2 = 1e-4
 
 EVAL_EVERY = 200
 NUM_EVAL_EPISODES = 10
 SKIP_EVAL = False
 
 UPDATE_PLOT = True
-PLOT_PATH = "reinforce_mean_reward.png"
+PLOT_PATH = "reinforce_mean_reward2.png"
 
 SAVE_GIF_AFTER_TRAIN = True
-GIF_PATH = "flappy_bird"
+GIF_PATH = "flappy_bird2"
 GIF_FRAMES = 1000
 GIF_FPS = 30
 
 # Reuse one trained policy across different seeds in run()
 REUSE_POLICY_ACROSS_SEEDS = True
-POLICY_CHECKPOINT_PATH = "challenge5_policy.pt"
+POLICY_CHECKPOINT_PATH = "challenge5_policy2.pt"
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 pygame.init()
@@ -308,6 +312,22 @@ def train_model(agent, train_env):
         episode_rewards.append(total_reward)
         episode_buffer.append((log_probs, rewards))
 
+        # LR curriculum based on moving average reward.
+        window = min(100, len(episode_rewards))
+        avg_reward = float(np.mean(episode_rewards[-window:]))
+        target_lr = None
+        if avg_reward > LR_STAGE_2_THRESHOLD:
+            target_lr = LR_STAGE_2
+        elif avg_reward > LR_STAGE_1_THRESHOLD:
+            target_lr = LR_STAGE_1
+
+        if target_lr is not None:
+            current_lr = agent.optimizer.param_groups[0]["lr"]
+            if target_lr < current_lr:
+                for group in agent.optimizer.param_groups:
+                    group["lr"] = target_lr
+                print(f"[lr] ep={episode:4d} avg_reward(100)={avg_reward:8.2f} -> lr={target_lr:.1e}")
+
         if len(episode_buffer) == NUM_TRAJECTORIES_PER_UPDATE or episode == NUM_TRAIN_EPISODES:
             all_log_probs: List[torch.Tensor] = []
             all_returns: List[torch.Tensor] = []
@@ -338,8 +358,6 @@ def train_model(agent, train_env):
             print(f"[eval] ep={episode:4d} mean_eval_reward={mean_eval_reward:8.2f}")
 
         if episode % PRINT_EVERY == 0:
-            window = min(100, len(episode_rewards))
-            avg_reward = float(np.mean(episode_rewards[-window:]))
             print(f"[train] ep={episode:4d} avg_reward(100)={avg_reward:8.2f}")
 
     agent.eval()
