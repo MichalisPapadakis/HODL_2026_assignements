@@ -65,7 +65,14 @@ class TensorWrapper(gym.ObservationWrapper):
     """Convert environment observations to float32 tensors."""
 
     def observation(self, obs):
-        obs_tensor = torch.tensor(obs, dtype=torch.float32)
+        return torch.as_tensor(obs, dtype=torch.float32)
+
+
+class TensorNoiseWrapper(gym.ObservationWrapper):
+    """Add gaussian noise to tensor observations for training."""
+
+    def observation(self, obs):
+        obs_tensor = torch.as_tensor(obs, dtype=torch.float32)
         if OBS_NOISE_STD > 0.0:
             noise = torch.randn_like(obs_tensor) * OBS_NOISE_STD
             if OBS_NOISE_CLIP is not None and OBS_NOISE_CLIP > 0.0:
@@ -296,6 +303,13 @@ def apply_wrappers(env):
     return env
 
 
+def apply_wrapper_train(env):
+    """Training-only wrappers (build on top of challenge wrappers)."""
+    env = apply_wrappers(env)
+    env = TensorNoiseWrapper(env)
+    return env
+
+
 def init_model(train_env):
     """
     Challenge-required model initialization hook.
@@ -311,7 +325,7 @@ def train_model(agent, train_env):
     Challenge-required training hook.
     Keep signature unchanged.
     """
-    train_env = apply_wrappers(train_env)
+    train_env = apply_wrapper_train(train_env)
     if REUSE_POLICY_ACROSS_SEEDS:
         # Resume from checkpoint if available; harmless if file doesn't exist.
         agent.load_policy(POLICY_CHECKPOINT_PATH)
