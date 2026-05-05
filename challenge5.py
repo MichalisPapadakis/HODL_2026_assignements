@@ -28,16 +28,17 @@ ENV_ID = "FlappyBird-v0"
 USE_LIDAR = True
 
 HIDDEN_DIM = 128
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4
 GAMMA = 0.99
 
-NUM_TRAIN_EPISODES = 2000
-MAX_STEPS_PER_EPISODE = 6000
+NUM_TRAIN_EPISODES = 800
+MAX_STEPS_PER_EPISODE = 400
 PRINT_EVERY = 25
-NUM_TRAJECTORIES_PER_UPDATE = 10
+NUM_TRAJECTORIES_PER_UPDATE = 8
 
 EVAL_EVERY = 200
 NUM_EVAL_EPISODES = 10
+SKIP_EVAL = False
 
 UPDATE_PLOT = True
 PLOT_PATH = "reinforce_mean_reward.png"
@@ -310,7 +311,7 @@ def train_model(agent, train_env):
 
             episode_buffer = []
 
-        if episode % EVAL_EVERY == 0:
+        if (not SKIP_EVAL) and episode % EVAL_EVERY == 0:
             eval_rewards = []
             for _ in range(NUM_EVAL_EPISODES):
                 eval_reward, _, _, _ = run_episode(train_env, agent, training=False)
@@ -422,7 +423,11 @@ def run():
         # Train the model using student's train_model function
         agent = train_model(agent, train_env)
 
-        score = evaluate_model(agent, valid_envs)
+        if SKIP_EVAL:
+            score = 0.0
+            print("Evaluation skipped (SKIP_EVAL=True).")
+        else:
+            score = evaluate_model(agent, valid_envs)
         scores.append(score)
         print(f"Score={score:.3f} | elapsed={time.time() - start:.1f}s")
 
