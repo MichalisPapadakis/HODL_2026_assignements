@@ -27,12 +27,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ENV_ID = "FlappyBird-v0"
 USE_LIDAR = True
 
-HIDDEN_DIM = 128
 LEARNING_RATE = 5e-4
 GAMMA = 0.99
 
 NUM_TRAIN_EPISODES = 800
-MAX_STEPS_PER_EPISODE = 400
+MAX_STEPS_PER_EPISODE = 250
 PRINT_EVERY = 25
 NUM_TRAJECTORIES_PER_UPDATE = 8
 
@@ -48,28 +47,28 @@ GIF_PATH = "flappy_bird"
 GIF_FRAMES = 1000
 GIF_FPS = 30
 
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+pygame.init()
 
-class NoWindowWrapper(gym.Wrapper):
-    """Prevent opening a pygame window in headless runs."""
 
-    def __init__(self, env):
-        super().__init__(env)
-        os.environ["SDL_VIDEODRIVER"] = "dummy"
-        pygame.init()
+class TensorWrapper(gym.ObservationWrapper):
+    """Convert environment observations to float32 tensors."""
 
-    def observation(self, *args):
-        return self.env.observation(*args)
+    def observation(self, obs):
+        return torch.tensor(obs, dtype=torch.float32)
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = HIDDEN_DIM):
+    def __init__(self, state_dim: int, action_dim: int):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(state_dim, 128),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(128),
+            nn.Linear(128, 64 ),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim),
+            nn.LayerNorm(64),
+            nn.Linear( 64 , action_dim),
             nn.Softmax(dim=-1),
         )
 
@@ -84,12 +83,11 @@ class REINFORCEAgent(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
-        hidden_dim: int = HIDDEN_DIM,
         lr: float = LEARNING_RATE,
         gamma: float = GAMMA,
     ):
         super().__init__()
-        self.policy = PolicyNetwork(state_dim, action_dim, hidden_dim).to(DEVICE)
+        self.policy = PolicyNetwork(state_dim, action_dim).to(DEVICE)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.gamma = gamma
         self.action_dim = action_dim
@@ -97,15 +95,9 @@ class REINFORCEAgent(nn.Module):
     def act(self, state, epsilon: float = 0.0, greedy: bool = False):
         """
         Select action from policy.
-        - `greedy=True` for deterministic evaluation.
-        - `epsilon` is kept for compatibility with external evaluators.
+        - `greedy=True` for deterministic evaluation.        
         """
-        if (not greedy) and epsilon > 0.0 and random.random() < epsilon:
-            action = random.randrange(self.action_dim)
-            dummy_log_prob = torch.log(torch.tensor(1.0 / self.action_dim, device=DEVICE))
-            return action, dummy_log_prob
-
-        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        state_tensor = state.to(DEVICE, dtype=torch.float32).unsqueeze(0)
         action_probs = self.policy(state_tensor)
 
         if greedy:
@@ -129,11 +121,9 @@ def discount_rewards(rewards: List[float], gamma: float) -> torch.Tensor:
     return torch.as_tensor(discounted_returns, dtype=torch.float32, device=DEVICE)
 
 
-def policy_loss(log_probs: List[torch.Tensor], discounted_rewards: torch.Tensor) -> torch.Tensor:
-    loss = 0.0
-    for log_prob, ret in zip(log_probs, discounted_rewards):
-        loss = loss + (-log_prob * ret)
-    return loss
+def policy_loss(log_probs : List[torch.Tensor], discounted_rewards: torch.Tensor):
+    log_probs = torch.stack(log_probs).reshape(-1)
+    return -(log_probs * discounted_rewards.reshape(-1)).sum()
 
 
 def update_policy(agent: REINFORCEAgent, log_probs: List[torch.Tensor], normalized_returns: torch.Tensor) -> None:
@@ -261,7 +251,8 @@ def apply_wrappers(env):
     Challenge-required wrapper hook.
     Keep signature unchanged.
     """
-    env = NoWindowWrapper(env)
+    # env = NoWindowWrapper(env)
+    env = TensorWrapper(env)
     return env
 
 
