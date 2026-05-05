@@ -34,6 +34,7 @@ NUM_TRAIN_EPISODES = 400
 MAX_STEPS_PER_EPISODE = 250
 PRINT_EVERY = 25
 NUM_TRAJECTORIES_PER_UPDATE = 8
+ENTROPY_COEF = 0.01
 LR_STAGE_1_THRESHOLD = 15.0
 LR_STAGE_2_THRESHOLD = 25.0
 LR_STAGE_1 = 2e-4
@@ -111,13 +112,15 @@ class REINFORCEAgent(nn.Module):
         if greedy:
             action = torch.argmax(action_probs, dim=-1).item()
             log_prob = torch.log(action_probs[0, action].clamp(min=1e-8))
-            return action, log_prob
+            zero_entropy = torch.zeros((), dtype=torch.float32, device=DEVICE)
+            return action, log_prob, zero_entropy
 
         distribution = Categorical(action_probs)
         action_tensor = distribution.sample()
         action = action_tensor.item()
         log_prob = distribution.log_prob(action_tensor)
-        return action, log_prob
+        entropy = distribution.entropy().squeeze(0)
+        return action, log_prob, entropy
 
     def save_policy(self, checkpoint_path: str = POLICY_CHECKPOINT_PATH) -> None:
         torch.save(self.policy.state_dict(), checkpoint_path)
@@ -148,8 +151,15 @@ def policy_loss(log_probs : List[torch.Tensor], discounted_rewards: torch.Tensor
     return -(log_probs * discounted_rewards.reshape(-1)).sum()
 
 
-def update_policy(agent: REINFORCEAgent, log_probs: List[torch.Tensor], normalized_returns: torch.Tensor) -> None:
-    loss = policy_loss(log_probs, normalized_returns)
+def update_policy(
+    agent: REINFORCEAgent,
+    log_probs: List[torch.Tensor],
+    normalized_returns: torch.Tensor,
+    entropies: List[torch.Tensor],
+) -> None:
+    base_loss = policy_loss(log_probs, normalized_returns)
+    entropy_bonus = torch.stack(entropies).mean()
+    loss = base_loss - ENTROPY_COEF * entropy_bonus
     agent.optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(agent.policy.parameters(), 1.0)
@@ -160,28 +170,30 @@ def run_episode(
     env,
     agent: REINFORCEAgent,
     training: bool = True,
-) -> Tuple[float, List[torch.Tensor], List[float], float]:
+) -> Tuple[float, List[torch.Tensor], List[float], List[torch.Tensor], float]:
     """
     Run one episode.
     Returns:
-      total_reward, log_probs, rewards, score
+      total_reward, log_probs, rewards, entropies, score
     where score approximates pipes passed by counting +1 rewards.
     """
     state, _ = env.reset()
     done = False
     rewards: List[float] = []
     log_probs: List[torch.Tensor] = []
+    entropies: List[torch.Tensor] = []
     total_reward = 0.0
     score = 0.0
     steps = 0
 
     while not done and steps < MAX_STEPS_PER_EPISODE:
-        action, log_prob = agent.act(state, greedy=not training)
+        action, log_prob, entropy = agent.act(state, greedy=not training)
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
         rewards.append(float(reward))
         log_probs.append(log_prob)
+        entropies.append(entropy)
         total_reward += float(reward)
         if reward >= 0.99:
             score += 1.0
@@ -190,8 +202,8 @@ def run_episode(
         steps += 1
 
     if training:
-        return float(total_reward), log_probs, rewards, float(score)
-    return float(total_reward), [], [], float(score)
+        return float(total_reward), log_probs, rewards, entropies, float(score)
+    return float(total_reward), [], [], [], float(score)
 
 
 def update_reinforce_plot(training_rewards: List[float], eval_points: List[Tuple[int, float]]) -> None:
@@ -247,7 +259,7 @@ def generate_policy_gif(agent: REINFORCEAgent, seed: int = 42) -> None:
     frames = []
     episode_reward = 0.0
     for _ in range(GIF_FRAMES):
-        action, _ = agent.act(state, greedy=True)
+        action, _, _ = agent.act(state, greedy=True)
         next_state, reward, terminated, truncated, _ = gif_env.step(action)
         frame = gif_env.render()
         if frame is not None:
@@ -302,15 +314,15 @@ def train_model(agent, train_env):
 
     episode_rewards: List[float] = []
     eval_points: List[Tuple[int, float]] = []
-    episode_buffer: List[Tuple[List[torch.Tensor], List[float]]] = []
+    episode_buffer: List[Tuple[List[torch.Tensor], List[float], List[torch.Tensor]]] = []
 
     if matplotlib.get_backend().lower() != "agg":
         plt.ion()
 
     for episode in range(1, NUM_TRAIN_EPISODES + 1):
-        total_reward, log_probs, rewards, _ = run_episode(train_env, agent, training=True)
+        total_reward, log_probs, rewards, entropies, _ = run_episode(train_env, agent, training=True)
         episode_rewards.append(total_reward)
-        episode_buffer.append((log_probs, rewards))
+        episode_buffer.append((log_probs, rewards, entropies))
 
         # LR curriculum based on moving average reward.
         window = min(100, len(episode_rewards))
@@ -331,23 +343,25 @@ def train_model(agent, train_env):
         if len(episode_buffer) == NUM_TRAJECTORIES_PER_UPDATE or episode == NUM_TRAIN_EPISODES:
             all_log_probs: List[torch.Tensor] = []
             all_returns: List[torch.Tensor] = []
+            all_entropies: List[torch.Tensor] = []
 
-            for trajectory_log_probs, trajectory_rewards in episode_buffer:
+            for trajectory_log_probs, trajectory_rewards, trajectory_entropies in episode_buffer:
                 returns = discount_rewards(trajectory_rewards, agent.gamma)
                 all_log_probs.extend(trajectory_log_probs)
                 all_returns.append(returns)
+                all_entropies.extend(trajectory_entropies)
 
-            if all_log_probs and all_returns:
+            if all_log_probs and all_returns and all_entropies:
                 batch_returns = torch.cat(all_returns)
                 batch_returns = (batch_returns - batch_returns.mean()) / (batch_returns.std() + 1e-8)
-                update_policy(agent, all_log_probs, batch_returns)
+                update_policy(agent, all_log_probs, batch_returns, all_entropies)
 
             episode_buffer = []
 
         if (not SKIP_EVAL) and episode % EVAL_EVERY == 0:
             eval_rewards = []
             for _ in range(NUM_EVAL_EPISODES):
-                eval_reward, _, _, _ = run_episode(train_env, agent, training=False)
+                eval_reward, _, _, _, _ = run_episode(train_env, agent, training=False)
                 eval_rewards.append(eval_reward)
             mean_eval_reward = float(np.mean(eval_rewards))
             eval_points.append((episode, mean_eval_reward))
@@ -428,7 +442,7 @@ def evaluate_model(agent, valid_envs):
             steps = 0
 
             while not done and steps < MAX_STEPS_PER_EPISODE:
-                action, _ = agent.act(obs, greedy=True)
+                action, _, _ = agent.act(obs, greedy=True)
                 obs, reward, terminated, truncated, _ = wrapped_env.step(action)
                 done = terminated or truncated
                 if reward >= 0.99:
