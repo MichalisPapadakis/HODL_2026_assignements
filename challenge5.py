@@ -30,7 +30,7 @@ USE_LIDAR = True
 LEARNING_RATE = 5e-4
 GAMMA = 0.99
 
-NUM_TRAIN_EPISODES = 800
+NUM_TRAIN_EPISODES = 400
 MAX_STEPS_PER_EPISODE = 250
 PRINT_EVERY = 25
 NUM_TRAJECTORIES_PER_UPDATE = 8
@@ -46,6 +46,10 @@ SAVE_GIF_AFTER_TRAIN = True
 GIF_PATH = "flappy_bird"
 GIF_FRAMES = 1000
 GIF_FPS = 30
+
+# Reuse one trained policy across different seeds in run()
+REUSE_POLICY_ACROSS_SEEDS = True
+POLICY_CHECKPOINT_PATH = "challenge5_policy.pt"
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 pygame.init()
@@ -110,6 +114,20 @@ class REINFORCEAgent(nn.Module):
         action = action_tensor.item()
         log_prob = distribution.log_prob(action_tensor)
         return action, log_prob
+
+    def save_policy(self, checkpoint_path: str = POLICY_CHECKPOINT_PATH) -> None:
+        torch.save(self.policy.state_dict(), checkpoint_path)
+        print(f"Saved policy checkpoint: {checkpoint_path}")
+
+    def load_policy(self, checkpoint_path: str = POLICY_CHECKPOINT_PATH) -> bool:
+        if not os.path.exists(checkpoint_path):
+            return False
+        state_dict = torch.load(checkpoint_path, map_location=DEVICE)
+        self.policy.load_state_dict(state_dict)
+        self.policy.to(DEVICE)
+        self.policy.eval()
+        print(f"Loaded policy checkpoint: {checkpoint_path}")
+        return True
 
 
 def discount_rewards(rewards: List[float], gamma: float) -> torch.Tensor:
@@ -217,6 +235,7 @@ def generate_policy_gif(agent: REINFORCEAgent, seed: int = 42) -> None:
         use_lidar=USE_LIDAR,
         render_mode="rgb_array",
         disable_env_checker=True,
+        pipe_gap=140,
     )
     gif_env = apply_wrappers(gif_env)
     state, _ = gif_env.reset(seed=seed)
@@ -272,6 +291,9 @@ def train_model(agent, train_env):
     Keep signature unchanged.
     """
     train_env = apply_wrappers(train_env)
+    if REUSE_POLICY_ACROSS_SEEDS:
+        # Resume from checkpoint if available; harmless if file doesn't exist.
+        agent.load_policy(POLICY_CHECKPOINT_PATH)
     agent.train()
 
     episode_rewards: List[float] = []
@@ -325,6 +347,9 @@ def train_model(agent, train_env):
     if SAVE_GIF_AFTER_TRAIN:
         generate_policy_gif(agent)
 
+    if REUSE_POLICY_ACROSS_SEEDS:
+        agent.save_policy(POLICY_CHECKPOINT_PATH)
+
     return agent
 
 
@@ -363,7 +388,7 @@ def create_envs(seed: int):
 
     valid_envs = []
     for eval_seed in [seed + 100, seed + 101, seed + 102]:
-        env = gym.make(ENV_ID, use_lidar=USE_LIDAR, disable_env_checker=True)
+        env = gym.make(ENV_ID, use_lidar=USE_LIDAR, disable_env_checker=True, pipe_gap=140)
         env.reset(seed=eval_seed)
         valid_envs.append(env)
 
