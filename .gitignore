@@ -10,3 +10,6 @@ fine_tuning_template.py
 flappy_bird42.gif
 flappy_bird43.gif
 flappy_bird44.gif
+
+challenge5_policy*.pt
+flappy_brid/
