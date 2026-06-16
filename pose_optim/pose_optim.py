@@ -8,6 +8,8 @@ We solve, for a fixed-feet / fixed-hand-target static pose:
          FK_{l/r foot}_z (world) == 0                    (feet on flat floor, h below pelvis)
          FK_foot x,y in box, left/right symmetric        (pelvis frame)
          q in joint limits
+         |tau_joints| <= URDF effort limits
+         rpy in [roll, pitch, yaw] bounds;  h in [H_MIN, H_MAX]
          Coulomb friction pyramid on each foot force     (world vertical normal)
          static equilibrium of the unactuated base:  tau_base == 0
     where tau = tG(q) - sum_c J_c^T F_c  (feet: decision vars, hands: fixed inputs).
@@ -33,30 +35,37 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 URDF_PATH = SCRIPT_DIR / "g1_29dof_rev_1_0.urdf"
 
 # Hand targets, expressed w.r.t. the pelvis (base) frame [m].
-POS_LEFT_ARM = np.array([0.25, 0.20, 0.10])
-POS_RIGHT_ARM = np.array([0.25, -0.20, 0.10])
+POS_LEFT_ARM = np.array([0.4, +0.15, 0.15])
+POS_RIGHT_ARM = np.array([0.3, -0.15, 0.05])
 
 # Horizontal forces applied ON the robot at each hand [N]  (Fz = 0).
-F_LEFT = np.array([0.0, 0.0])   # (Fx, Fy)
-F_RIGHT = np.array([0.0, 0.0])  # (Fx, Fy)
+F_LEFT = np.array([-20.0, -30.0])   # (Fx, Fy)
+F_RIGHT = np.array([-20.0, 0.0])  # (Fx, Fy)
 
 # Objective weights (scalars or broadcastable diagonals).
-W1 = 1.0e-2   # ||tau||      (joint torques)
-W2 = 1.0e-4   # ||F_feet||   (foot reaction forces)
-W3 = 1.0e+0   # (h - H0)^2   (height regularization)
-W4 = 1.0e+0   # ||rpy||^2    (keep pelvis upright)
+W1 = 1.0e-1   # ||tau||      (joint torques)
+W2 = 1.0e-5   # ||F_feet||   (foot reaction forces)
+W3 = 1.0e-5   # (h - H0)^2   (height regularization)
+W4 = [1.0e2, 1.0e-5, 1.0e2]   # ||rpy||^2    (keep pelvis upright)
 
 # Constraint penalty weights.
-LAM_EQ = 1.0e+1     # base static equilibrium  (tau_base == 0)
+LAM_EQ = 5.0e+1     # base static equilibrium  (tau_base == 0)
 LAM_ARM = 1.0e+3    # hand FK == target
-LAM_FOOTZ = 1.0e+3  # foot on floor (world z == 0)
-LAM_SYM = 1.0e+2    # left/right foot symmetry
-LAM_BOX = 1.0e+2    # foot x,y inside the box
+LAM_FOOTZ = 1.0e+2  # foot on floor (world z == 0)
+LAM_SYM = 1e-3    # left/right foot symmetry
+LAM_BOX = 1.0e+1    # foot x,y inside the box
 LAM_QLIM = 1.0e+2   # joint position limits
-LAM_FRIC = 1.0e+0   # Coulomb friction pyramid
+LAM_TLIM = 1.0e+2   # joint torque limits (URDF effort)
+LAM_RPY = 1.0e+2    # pelvis roll/pitch/yaw bounds
+LAM_H = 1.0e+2      # pelvis height bounds
+LAM_FRIC = 1.0e+1   # Coulomb friction pyramid
 
 # Geometry / physics.
 H0 = 0.70           # nominal pelvis height above the feet [m]
+H_MIN, H_MAX = 0.50, 0.75   # pelvis height bounds [m]
+DEG = np.pi / 180.0
+RPY_LOWER = np.array([-30.0, -5.0, -45.0]) * DEG   # roll, pitch, yaw [rad]
+RPY_UPPER = np.array([+30.0, +40.0, +45.0]) * DEG
 MU = 0.6            # friction coefficient
 XL, XU = -0.15, 0.20    # foot x box in pelvis frame [m]
 YL, YU = 0.05, 0.25     # foot |y| box (right foot uses the mirror) [m]
@@ -69,7 +78,7 @@ PRINT_EVERY = 100
 
 # Visualization.
 VISUALIZE = True
-FORCE_SCALE = 1.0e-3    # arrow length per Newton [m/N]
+FORCE_SCALE = 5.0e-2    # arrow length per Newton [m/N]
 TARGET_RADIUS = 0.03
 
 # ============================================================
@@ -94,6 +103,9 @@ FOOT_IDS = FRAME_IDS[:2]
 
 Q_LOWER = torch.as_tensor(model.lowerPositionLimit[7:])
 Q_UPPER = torch.as_tensor(model.upperPositionLimit[7:])
+TAU_LIMIT = torch.as_tensor(model.effortLimit[6:6 + NJ])  # URDF effort [N·m]
+RPY_LO = torch.as_tensor(RPY_LOWER)
+RPY_HI = torch.as_tensor(RPY_UPPER)
 TOTAL_MASS = float(sum(model.inertias[i].mass for i in range(1, model.njoints)))
 GRAVITY = float(abs(model.gravity.linear[2]))
 
@@ -230,6 +242,13 @@ def weighted_sq(residual, weight):
     return (torch.as_tensor(weight) * residual.pow(2)).sum()
 
 
+COST_KEYS = ("tau", "F_feet", "height", "upright")
+PENALTY_KEYS = (
+    "equilibrium", "arm", "foot_z", "symmetry", "box",
+    "qlim", "tlim", "rpy", "h", "friction",
+)
+
+
 def compute_terms(h, rpy, q23, foot_forces):
     """Return a dict of all (named) scalar loss terms for diagnostics + total."""
     rel = RelFramePos.apply(q23)              # (4, 3) pelvis frame
@@ -249,6 +268,10 @@ def compute_terms(h, rpy, q23, foot_forces):
            + torch.relu(YL - fy.abs()) + torch.relu(fy.abs() - YU))
 
     qviol = torch.relu(q23 - Q_UPPER) + torch.relu(Q_LOWER - q23)
+    tau_j = tau[6:]
+    tviol = torch.relu(tau_j.abs() - TAU_LIMIT)
+    rpyviol = torch.relu(rpy - RPY_HI) + torch.relu(RPY_LO - rpy)
+    hviol = torch.relu(h - H_MAX) + torch.relu(H_MIN - h)
 
     fz = foot_forces[:, 2]
     fric = (torch.relu(-fz)
@@ -259,17 +282,35 @@ def compute_terms(h, rpy, q23, foot_forces):
         "tau": W1 * weighted_sq(tau[6:], 1.0),
         "F_feet": W2 * weighted_sq(foot_forces, 1.0),
         "height": W3 * (h - H0) ** 2,
-        "upright": W4 * weighted_sq(rpy, 1.0),
+        "upright":  weighted_sq(rpy, W4),
         "equilibrium": LAM_EQ * weighted_sq(tau[:6], 1.0),
         "arm": LAM_ARM * (hand_rel - tgt).pow(2).sum(),
         "foot_z": LAM_FOOTZ * foot_world_z.pow(2).sum(),
         "symmetry": LAM_SYM * ((fx[0] - fx[1]) ** 2 + (fy[0] + fy[1]) ** 2),
         "box": LAM_BOX * box.pow(2).sum(),
         "qlim": LAM_QLIM * qviol.pow(2).sum(),
+        "tlim": LAM_TLIM * tviol.pow(2).sum(),
+        "rpy": LAM_RPY * rpyviol.pow(2).sum(),
+        "h": LAM_H * hviol.pow(2),
         "friction": LAM_FRIC * fric.pow(2).sum(),
     }
-    total = sum(terms.values())
-    return total, terms
+    cost_terms = {k: terms[k] for k in COST_KEYS}
+    penalty_terms = {k: terms[k] for k in PENALTY_KEYS}
+    cost = sum(cost_terms.values())
+    penalty = sum(penalty_terms.values())
+    total = cost + penalty
+    return total, cost, penalty, cost_terms, penalty_terms
+
+
+def print_loss(step, total, cost, penalty, cost_terms, penalty_terms):
+    """Print total / cost / penalty and each term on separate lines."""
+    print(f"[{step:4d}] Total loss: {float(total.detach()):.4e}")
+    print(f"       Cost:     {float(cost.detach()):.4e}")
+    for k in COST_KEYS:
+        print(f"         {k:12s} {float(cost_terms[k].detach()):.4e}")
+    print(f"       Penalty:  {float(penalty.detach()):.4e}")
+    for k in PENALTY_KEYS:
+        print(f"         {k:12s} {float(penalty_terms[k].detach()):.4e}")
 
 
 # ============================================================
@@ -280,8 +321,10 @@ def initial_guess():
     rpy = torch.zeros(3, requires_grad=True)
     q23 = torch.zeros(NQJ, requires_grad=True)
     half_weight = TOTAL_MASS * GRAVITY / 2.0
-    foot_forces = torch.tensor([[0.0, 0.0, half_weight],
-                                [0.0, 0.0, half_weight]], requires_grad=True)
+    half_fx = -(F_LEFT[0]+F_RIGHT[0])/2
+    half_fy = -(F_LEFT[1]+F_RIGHT[1])/2
+    foot_forces = torch.tensor([[half_fx, half_fy, half_weight],
+                                [half_fx, half_fy, half_weight]], requires_grad=True)
     return h, rpy, q23, foot_forces
 
 
@@ -293,13 +336,14 @@ def solve():
 
     for step in range(STEPS + 1):
         opt.zero_grad()
-        total, terms = compute_terms(h, rpy, q23, foot_forces)
+        total, cost, penalty, cost_terms, penalty_terms = compute_terms(
+            h, rpy, q23, foot_forces
+        )
         if step < STEPS:
             total.backward()
             opt.step()
         if step % PRINT_EVERY == 0 or step == STEPS:
-            parts = "  ".join(f"{k}={float(v.detach()):.3e}" for k, v in terms.items())
-            print(f"[{step:4d}] L={float(total.detach()):.4e}  {parts}")
+            print_loss(step, total, cost, penalty, cost_terms, penalty_terms)
 
     return h, rpy, q23, foot_forces
 
