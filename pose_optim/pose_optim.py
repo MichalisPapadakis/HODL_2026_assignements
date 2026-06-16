@@ -6,6 +6,7 @@ We solve, for a fixed-feet / fixed-hand-target static pose:
     s.t. (soft penalties)
          FK_{l/r hand}(q)        == target_{l/r}        (pelvis frame)
          FK_{l/r foot}_z (world) == 0                    (feet on flat floor, h below pelvis)
+         ankle z-axis upright in world frame             (flat foot contact)
          FK_foot x,y in box, left/right symmetric        (pelvis frame)
          q in joint limits
          |tau_joints| <= URDF effort limits
@@ -52,6 +53,7 @@ W4 = [1.0e2, 1.0e-5, 1.0e2]   # ||rpy||^2    (keep pelvis upright)
 LAM_EQ = 5.0e+1     # base static equilibrium  (tau_base == 0)
 LAM_ARM = 1.0e+3    # hand FK == target
 LAM_FOOTZ = 1.0e+2  # foot on floor (world z == 0)
+LAM_ANKLE = 1.0e+3  # ankle z-axis upright in world frame
 LAM_SYM = 1e-3    # left/right foot symmetry
 LAM_BOX = 1.0e+1    # foot x,y inside the box
 LAM_QLIM = 1.0e+2   # joint position limits
@@ -155,6 +157,39 @@ class RelFramePos(torch.autograd.Function):
         return torch.as_tensor(grad_q23)
 
 
+class FootAnkleZWorld(torch.autograd.Function):
+    """World-frame z-axis of each ankle_roll link (2, 3), from (rpy, q23)."""
+
+    @staticmethod
+    def forward(ctx, rpy, q23):
+        q = make_config(0.0, _np(rpy), _np(q23))
+        pin.framesForwardKinematics(model, data, q)
+        z = np.stack([data.oMf[fid].rotation[:, 2] for fid in FOOT_IDS])
+        ctx.rpy, ctx.q23 = _np(rpy), _np(q23)
+        return torch.as_tensor(z)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        g = _np(grad_out)  # (2, 3)
+
+        def s(rpy, q23):
+            q = make_config(0.0, rpy, q23)
+            pin.framesForwardKinematics(model, data, q)
+            z = np.stack([data.oMf[fid].rotation[:, 2] for fid in FOOT_IDS])
+            return (g * z).sum()
+
+        eps = 1e-6
+        grad_rpy = np.zeros(3)
+        for k in range(3):
+            d = np.zeros(3); d[k] = eps
+            grad_rpy[k] = (s(ctx.rpy + d, ctx.q23) - s(ctx.rpy - d, ctx.q23)) / (2 * eps)
+        grad_q23 = np.zeros(NQJ)
+        for k in range(NQJ):
+            d = np.zeros(NQJ); d[k] = eps
+            grad_q23[k] = (s(ctx.rpy, ctx.q23 + d) - s(ctx.rpy, ctx.q23 - d)) / (2 * eps)
+        return torch.as_tensor(grad_rpy), torch.as_tensor(grad_q23)
+
+
 def _hand_forces_world():
     return np.array([[F_LEFT[0], F_LEFT[1], 0.0],
                      [F_RIGHT[0], F_RIGHT[1], 0.0]])
@@ -244,7 +279,7 @@ def weighted_sq(residual, weight):
 
 COST_KEYS = ("tau", "F_feet", "height", "upright")
 PENALTY_KEYS = (
-    "equilibrium", "arm", "foot_z", "symmetry", "box",
+    "equilibrium", "arm", "foot_z", "ankle_z", "symmetry", "box",
     "qlim", "tlim", "rpy", "h", "friction",
 )
 
@@ -259,6 +294,8 @@ def compute_terms(h, rpy, q23, foot_forces):
 
     R = rpy_to_matrix_torch(rpy)
     foot_world_z = (foot_rel @ R.T)[:, 2] + h  # world z of each foot
+    ankle_z_world = FootAnkleZWorld.apply(rpy, q23)  # (2, 3)
+    world_up = torch.tensor([0.0, 0.0, 1.0])
 
     tgt = torch.as_tensor(np.stack([POS_LEFT_ARM, POS_RIGHT_ARM]))
 
@@ -286,6 +323,7 @@ def compute_terms(h, rpy, q23, foot_forces):
         "equilibrium": LAM_EQ * weighted_sq(tau[:6], 1.0),
         "arm": LAM_ARM * (hand_rel - tgt).pow(2).sum(),
         "foot_z": LAM_FOOTZ * foot_world_z.pow(2).sum(),
+        "ankle_z": LAM_ANKLE * (ankle_z_world - world_up).pow(2).sum(),
         "symmetry": LAM_SYM * ((fx[0] - fx[1]) ** 2 + (fy[0] + fy[1]) ** 2),
         "box": LAM_BOX * box.pow(2).sum(),
         "qlim": LAM_QLIM * qviol.pow(2).sum(),
