@@ -40,18 +40,18 @@ POS_LEFT_ARM = np.array([0.4, +0.15, 0.15])
 POS_RIGHT_ARM = np.array([0.3, -0.15, 0.05])
 
 # Horizontal forces applied ON the robot at each hand [N]  (Fz = 0).
-F_LEFT = np.array([-20.0, -30.0])   # (Fx, Fy)
-F_RIGHT = np.array([-20.0, 0.0])  # (Fx, Fy)
+F_LEFT = np.array([-40.0, -30.0])   # (Fx, Fy)
+F_RIGHT = np.array([-40.0, 0.0])  # (Fx, Fy)
 
 # Objective weights (scalars or broadcastable diagonals).
 W1 = 1.0e-1   # ||tau||      (joint torques)
-W2 = 1.0e-5   # ||F_feet||   (foot reaction forces)
-W3 = 1.0e-5   # (h - H0)^2   (height regularization)
-W4 = [1.0e2, 1.0e-5, 1.0e2]   # ||rpy||^2    (keep pelvis upright)
+W2 = 1.0e-8   # ||F_feet||   (foot reaction forces)
+W3 = 1.0e-8   # (h - H0)^2   (height regularization)
+W4 = [1.0e5, 1.0e-5, 1.0e5]   # ||rpy||^2    (keep pelvis upright)
 
 # Constraint penalty weights.
-LAM_EQ = 5.0e+1     # base static equilibrium  (tau_base == 0)
-LAM_ARM = 1.0e+3    # hand FK == target
+LAM_EQ = 5.0e+2     # base static equilibrium  (tau_base == 0)
+LAM_ARM = 5.0e+3    # hand FK == target
 LAM_FOOTZ = 1.0e+2  # foot on floor (world z == 0)
 LAM_ANKLE = 1.0e+3  # ankle z-axis upright in world frame
 LAM_SYM = 1e-3    # left/right foot symmetry
@@ -73,8 +73,8 @@ XL, XU = -0.15, 0.20    # foot x box in pelvis frame [m]
 YL, YU = 0.05, 0.25     # foot |y| box (right foot uses the mirror) [m]
 
 # Optimizer.
-OPT = "adam"        # "adam" or "sgd"
-LR = 5.0e-3
+OPT = "LBFGS"        # "adam" or "sgd" or "LBFGS"
+LR = 5.0e-2
 STEPS = 1500
 PRINT_EVERY = 100
 
@@ -369,8 +369,16 @@ def initial_guess():
 def solve():
     h, rpy, q23, foot_forces = initial_guess()
     params = [h, rpy, q23, foot_forces]
-    opt = (torch.optim.Adam(params, lr=LR) if OPT == "adam"
-           else torch.optim.SGD(params, lr=LR))
+    opt = torch.optim.Adam(params, lr=LR) 
+    if OPT == "adam":
+        opt = torch.optim.Adam(params, lr=LR) 
+    elif OPT == "SGD":
+        otp =  torch.optim.SGD(params, lr=LR)
+    elif OPT == "LBFGS":
+        otp =  torch.optim.LBFGS(params, lr=LR)
+    else: 
+        opt = torch.optim.Adam(params, lr=LR) 
+
 
     for step in range(STEPS + 1):
         opt.zero_grad()
