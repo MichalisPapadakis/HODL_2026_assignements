@@ -41,77 +41,24 @@ import torch
 torch.set_default_dtype(torch.float64)
 
 # ============================================================
-# User inputs / configuration (edit values directly, no CLI)
+# Configuration — loaded from pose_optim_config.py
 # ============================================================
+from pose_optim_config import (  # noqa: E402
+    URDF_PATH,
+    POS_LEFT_ARM, POS_RIGHT_ARM,
+    H_USER, RP_USER,
+    F_LEFT, F_RIGHT,
+    W1, W2, W3, W4, W5, W6,
+    LAM_EQ, LAM_FOOTZ, LAM_ARM, LAM_BOX, LAM_QLIM, LAM_TLIM,
+    LAM_RP, LAM_H, LAM_FRIC, LAM_ANKLE, LAM_ARM_ORI, LAM_HEAD, LAM_SYM,
+    H0, Z_FEET_0, H_MIN, H_MAX, DEG,
+    RPY_LOWER, RPY_UPPER, MU, XL, XU, YL, YU,
+    HAND_RPY_LO_R, HAND_RPY_HI_R,
+    OPT, LR, STEPS, PRINT_EVERY,
+    VISUALIZE, FORCE_SCALE, TARGET_RADIUS,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-URDF_PATH = SCRIPT_DIR / "g1_29dof_rev_1_0.urdf"
-
-# Hand targets in base/pelvis frame [m].
-POS_LEFT_ARM  = np.array([0.22959137,  0.10266018, 0.05003488])
-POS_RIGHT_ARM = np.array([0.22959137, -0.10266018, 0.05003488])
-
-# User-defined transform: bakes base-frame targets into fixed YAG-frame targets.
-# Set to the intended nominal robot pose (yaw always 0).
-H_USER  = 0.76                  # nominal base height [m]
-RP_USER = np.array([0., 0.])    # (roll, pitch) [rad]
-
-# Horizontal forces applied ON the robot at each hand [N]  (Fz = 0).
-F_LEFT  = np.array([-40.0, -30.0])   # (Fx, Fy)
-F_RIGHT = np.array([-40.0,   0.0])   # (Fx, Fy)
-
-# Objective weights (scalars or broadcastable diagonals).
-W1 = 2.5e-2   # ||tau||      (joint torques)
-W2 = 1.0e-3   # ||F_feet||   (foot reaction forces)
-W3 = 1.0e-3   # (h - H0)^2   (height regularization)
-W4 = [1.0e2, 1.0e-2]   # ||rp||^2  (roll, pitch; keep pelvis upright)
-W5 = 1.0e-2  # ||hip_yaw||^2  (left/right hip_yaw near 0)
-W6 = 1.0e+1   # one-sided shoulder roll (left < 0, right > 0)
-
-# Constraint penalty weights.
-LAM_EQ    = 2.0e+3   # base static equilibrium  (tau_base == 0)
-LAM_FOOTZ = 2.0e+3  # foot on floor (world z == 0)
-LAM_ARM  = 5.0e+2   # hand FK == target         (YAG frame)
-
-LAM_BOX  = 5.0e+2   # foot x,y inside the box
-LAM_QLIM = 1.0e+3   # joint position limits
-LAM_TLIM = 1.0e+3   # joint torque limits (URDF effort)
-LAM_RP   = 1.0e+3   # pelvis roll/pitch bounds
-LAM_H    = 1.0e+3   # pelvis height bounds
-LAM_FRIC = 1.0e+2   # Coulomb friction pyramid
-
-# Regularization
-LAM_ANKLE   = 1.0e+2  # ankle z-axis upright in world frame
-LAM_ARM_ORI = 5.0e+1   # hand orientation RPY in base frame
-LAM_HEAD    = 1.0e+2   # head behind arms (head x < arm target x)
-LAM_SYM     = 5.0e-2   # left/right foot symmetry
-
-
-# Geometry / physics.
-H0 = 0.775          # nominal pelvis height above the feet [m]
-Z_FEET_0 = 0.035
-H_MIN, H_MAX = 0.59, 0.775   # pelvis height bounds [m]
-DEG = np.pi / 180.0
-RPY_LOWER = np.array([-30.0, -5.0]) * DEG   # roll, pitch lower bounds [rad]
-RPY_UPPER = np.array([+30.0, +40.0]) * DEG  # roll, pitch upper bounds [rad]
-MU = 0.6            # friction coefficient
-XL, XU = -0.15, 0.20    # foot x box in pelvis frame [m]
-YL, YU =  0.05, 0.25    # foot |y| box (right foot uses the mirror) [m]
-
-# Hand orientation bounds in base frame [rad], extrinsic XYZ (matches filter_arm_feasibility).
-# Right hand; left uses mirrored roll/yaw: (-roll, pitch, -yaw) checked against these.
-HAND_RPY_LO_R = np.array([-30.0, -80.0, -60.0]) * DEG   # roll, pitch, yaw
-HAND_RPY_HI_R = np.array([+30.0, +80.0, +30.0]) * DEG
-
-# Optimizer.
-OPT = "LBFGS"        # "adam" or "SGD" or "LBFGS"
-LR = 5.0e-2
-STEPS = 1000
-PRINT_EVERY = 100
-
-# Visualization.
-VISUALIZE = True
-FORCE_SCALE = 2.5e-2    # arrow length per Newton [m/N]
-TARGET_RADIUS = 0.03
 
 # ============================================================
 # Model
