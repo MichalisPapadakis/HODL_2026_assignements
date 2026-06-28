@@ -11,6 +11,7 @@ We solve, for a fixed-feet / fixed-hand-target static pose:
          q in joint limits (URDF + extra: hip_yaw in ±60°, elbow < 90°,
              left_shoulder_yaw > -10°, right_shoulder_roll < 10°)
          hand orientation RPY in base frame (right: filter ranges; left: mirrored roll/yaw)
+         head_link x in base frame < min(POS_LEFT_ARM[0], POS_RIGHT_ARM[0])  (head behind arms)
          |tau_joints| <= URDF effort limits
          rp in [roll, pitch] bounds;  h in [H_MIN, H_MAX]
          Coulomb friction pyramid on each foot force                  (world vertical normal)
@@ -46,8 +47,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 URDF_PATH = SCRIPT_DIR / "g1_29dof_rev_1_0.urdf"
 
 # Hand targets in base/pelvis frame [m].
-POS_LEFT_ARM  = np.array([0.4, +0.15, 0.25])
-POS_RIGHT_ARM = np.array([0.3,  -0.10, 0.15])
+POS_LEFT_ARM  = np.array([0.22959137,  0.10266018, 0.05003488])
+POS_RIGHT_ARM = np.array([0.22959137, -0.10266018, 0.05003488])
 
 # User-defined transform: bakes base-frame targets into fixed YAG-frame targets.
 # Set to the intended nominal robot pose (yaw always 0).
@@ -59,7 +60,7 @@ F_LEFT  = np.array([-40.0, -30.0])   # (Fx, Fy)
 F_RIGHT = np.array([-40.0,   0.0])   # (Fx, Fy)
 
 # Objective weights (scalars or broadcastable diagonals).
-W1 = 5.0e-2   # ||tau||      (joint torques)
+W1 = 2.5e-2   # ||tau||      (joint torques)
 W2 = 1.0e-3   # ||F_feet||   (foot reaction forces)
 W3 = 1.0e-3   # (h - H0)^2   (height regularization)
 W4 = [1.0e2, 1.0e-2]   # ||rp||^2  (roll, pitch; keep pelvis upright)
@@ -67,11 +68,11 @@ W5 = 1.0e-2  # ||hip_yaw||^2  (left/right hip_yaw near 0)
 W6 = 1.0e+1   # one-sided shoulder roll (left < 0, right > 0)
 
 # Constraint penalty weights.
-LAM_EQ   = 1.0e+3   # base static equilibrium  (tau_base == 0)
-LAM_FOOTZ = 1.0e+3  # foot on floor (world z == 0)
-LAM_ARM  = 2.5e+2   # hand FK == target         (YAG frame)
+LAM_EQ    = 2.0e+3   # base static equilibrium  (tau_base == 0)
+LAM_FOOTZ = 2.0e+3  # foot on floor (world z == 0)
+LAM_ARM  = 5.0e+2   # hand FK == target         (YAG frame)
 
-LAM_BOX  = 1.0e+3   # foot x,y inside the box
+LAM_BOX  = 5.0e+2   # foot x,y inside the box
 LAM_QLIM = 1.0e+3   # joint position limits
 LAM_TLIM = 1.0e+3   # joint torque limits (URDF effort)
 LAM_RP   = 1.0e+3   # pelvis roll/pitch bounds
@@ -80,13 +81,15 @@ LAM_FRIC = 1.0e+2   # Coulomb friction pyramid
 
 # Regularization
 LAM_ANKLE   = 1.0e+2  # ankle z-axis upright in world frame
-LAM_ARM_ORI = 1.0e+2   # hand orientation RPY in base frame
-LAM_SYM     = 2.0e-1   # left/right foot symmetry
+LAM_ARM_ORI = 5.0e+1   # hand orientation RPY in base frame
+LAM_HEAD    = 1.0e+2   # head behind arms (head x < arm target x)
+LAM_SYM     = 5.0e-2   # left/right foot symmetry
 
 
 # Geometry / physics.
-H0 = 0.70           # nominal pelvis height above the feet [m]
-H_MIN, H_MAX = 0.59, 0.75   # pelvis height bounds [m]
+H0 = 0.775          # nominal pelvis height above the feet [m]
+Z_FEET_0 = 0.035
+H_MIN, H_MAX = 0.59, 0.775   # pelvis height bounds [m]
 DEG = np.pi / 180.0
 RPY_LOWER = np.array([-30.0, -5.0]) * DEG   # roll, pitch lower bounds [rad]
 RPY_UPPER = np.array([+30.0, +40.0]) * DEG  # roll, pitch upper bounds [rad]
@@ -102,12 +105,12 @@ HAND_RPY_HI_R = np.array([+30.0, +80.0, +30.0]) * DEG
 # Optimizer.
 OPT = "LBFGS"        # "adam" or "SGD" or "LBFGS"
 LR = 5.0e-2
-STEPS = 1500
+STEPS = 1000
 PRINT_EVERY = 100
 
 # Visualization.
 VISUALIZE = True
-FORCE_SCALE = 5.0e-2    # arrow length per Newton [m/N]
+FORCE_SCALE = 2.5e-2    # arrow length per Newton [m/N]
 TARGET_RADIUS = 0.03
 
 # ============================================================
@@ -169,6 +172,11 @@ TOTAL_MASS = float(sum(model.inertias[i].mass for i in range(1, model.njoints)))
 print(f"total mass: {TOTAL_MASS}")
 GRAVITY    = float(abs(model.gravity.linear[2]))
 
+# Decision-variable scaling (optimizer works in normalized space; q23 is unscaled).
+S_H = 0.10   # meters
+S_RP = 0.30  # radians
+S_F = torch.tensor([100.0, 100.0, TOTAL_MASS * GRAVITY / 2.0])  # per (Fx, Fy, Fz) [N]
+
 # Fixed YAG-frame hand targets, computed from base-frame targets + user transform.
 _R_user       = pin.rpy.rpyToMatrix(np.append(RP_USER, 0.0))   # yaw = 0
 TGT_LEFT_YAG  = _R_user @ POS_LEFT_ARM  + np.array([0., 0., H_USER])
@@ -177,6 +185,8 @@ TGT_RIGHT_YAG = _R_user @ POS_RIGHT_ARM + np.array([0., 0., H_USER])
 HAND_RPY_LO = torch.as_tensor(HAND_RPY_LO_R)
 HAND_RPY_HI = torch.as_tensor(HAND_RPY_HI_R)
 HAND_FRAME_IDS = FRAME_IDS[2:]   # [left_hand, right_hand]
+HEAD_FRAME_ID = model.getFrameId("d435_link")
+HEAD_X_MAX = float(min(TGT_LEFT_YAG[0], TGT_RIGHT_YAG[0]))   # head x must stay below this [m]
 
 
 def make_config(h, rpy, q23):
@@ -221,6 +231,28 @@ class RelFramePos(torch.autograd.Function):
             J = pin.computeFrameJacobian(model, data, ctx.q, fid,
                                          pin.LOCAL_WORLD_ALIGNED)
             grad_q23 += J[:3, 6:].T @ g[i]
+        return torch.as_tensor(grad_q23)
+
+
+class HeadPosBase(torch.autograd.Function):
+    """head_link (d435_link in urdf) position in the pelvis frame (3,), from q23."""
+
+    @staticmethod
+    def forward(ctx, q23):
+        q = np.zeros(model.nq)
+        q[6] = 1.0
+        q[7:] = _np(q23)
+        pin.framesForwardKinematics(model, data, q)
+        pos = data.oMf[HEAD_FRAME_ID].translation.copy()
+        ctx.q = q
+        return torch.as_tensor(pos)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        g = _np(grad_out)
+        J = pin.computeFrameJacobian(model, data, ctx.q, HEAD_FRAME_ID,
+                                     pin.LOCAL_WORLD_ALIGNED)
+        grad_q23 = J[:3, 6:].T @ g
         return torch.as_tensor(grad_q23)
 
 
@@ -382,7 +414,7 @@ def weighted_sq(residual, weight):
 
 COST_KEYS = ("tau", "F_feet", "height", "upright", "hip_yaw", "shoulder_roll")
 PENALTY_KEYS = (
-    "equilibrium", "arm", "arm_ori", "foot_z", "ankle_z", "symmetry", "box",
+    "equilibrium", "arm", "arm_ori", "head_behind", "foot_z", "ankle_z", "symmetry", "box",
     "qlim", "tlim", "rp", "h", "friction",
 )
 
@@ -398,7 +430,7 @@ def compute_terms(h, rp, q23, foot_forces):
     # w_R_b: rotation from base to world (yaw = 0).
     R = rpy_to_matrix_torch(torch.cat([rp, torch.zeros(1)]))
 
-    foot_world_z = (foot_rel @ R.T)[:, 2] + h   # world z of each foot
+    foot_world_z = (foot_rel @ R.T)[:, 2] + h - Z_FEET_0   # world z of each foot
     ankle_z_world = FootAnkleZWorld.apply(rp, q23)   # (2, 3)
     world_up = torch.tensor([0.0, 0.0, 1.0])
 
@@ -412,6 +444,9 @@ def compute_terms(h, rp, q23, foot_forces):
     rpy_l_sym = torch.stack([-hand_rpy[0, 0], hand_rpy[0, 1], -hand_rpy[0, 2]])
     rpy_l_viol = (torch.relu(rpy_l_sym - HAND_RPY_HI)
                   + torch.relu(HAND_RPY_LO - rpy_l_sym))
+
+    head_x = (HeadPosBase.apply(q23)@R.T)[0]
+    head_behind_viol = torch.relu(head_x+0.1 - HEAD_X_MAX)
 
     fx = foot_rel[:, 0]
     fy = foot_rel[:, 1]
@@ -442,6 +477,7 @@ def compute_terms(h, rp, q23, foot_forces):
         "equilibrium": LAM_EQ   * weighted_sq(tau[:6], 1.0),
         "arm":         LAM_ARM  * (hand_world - tgt).pow(2).sum(),
         "arm_ori":     LAM_ARM_ORI * (rpy_l_viol.pow(2).sum() + rpy_r_viol.pow(2).sum()),
+        "head_behind": LAM_HEAD * head_behind_viol.pow(2),
         "foot_z":      LAM_FOOTZ * foot_world_z.pow(2).sum(),
         "ankle_z":     LAM_ANKLE * (ankle_z_world - world_up).pow(2).sum(),
         "symmetry":    LAM_SYM  * ((fx[0] - fx[1]) ** 2 + (fy[0] + fy[1]) ** 2),
@@ -474,21 +510,35 @@ def print_loss(step, total, cost, penalty, cost_terms, penalty_terms):
 # ============================================================
 # Optimization
 # ============================================================
-def initial_guess():
-    h  = torch.tensor(H0, requires_grad=True)
-    rp = torch.zeros(2, requires_grad=True)   # (roll, pitch); yaw fixed at 0
-    q23 = torch.zeros(NQJ, requires_grad=True)
+def vars_from_normalized(h_n, rp_n, q23, F_n):
+    """Map normalized optimizer variables to physical units."""
+    h = H0 + S_H * h_n
+    rp = S_RP * rp_n
+    foot_forces = F_n * S_F
+    return h, rp, q23, foot_forces
+
+
+def initial_guess_normalized():
+    """Physical initial guess; returned tensors are normalized for the optimizer."""
+    h = torch.tensor(H0)
+    rp = torch.zeros(2)   # (roll, pitch); yaw fixed at 0
+    q23 = torch.zeros(NQJ)
     half_weight = TOTAL_MASS * GRAVITY / 2.0
     half_fx = -(F_LEFT[0] + F_RIGHT[0]) / 2
     half_fy = -(F_LEFT[1] + F_RIGHT[1]) / 2
     foot_forces = torch.tensor([[half_fx, half_fy, half_weight],
-                                [half_fx, half_fy, half_weight]], requires_grad=True)
-    return h, rp, q23, foot_forces
+                                [half_fx, half_fy, half_weight]])
+
+    h_n = ((h - H0) / S_H).requires_grad_(True)
+    rp_n = (rp / S_RP).requires_grad_(True)
+    q23 = q23.requires_grad_(True)
+    F_n = (foot_forces / S_F).requires_grad_(True)
+    return h_n, rp_n, q23, F_n
 
 
 def solve():
-    h, rp, q23, foot_forces = initial_guess()
-    params = [h, rp, q23, foot_forces]
+    h_n, rp_n, q23, F_n = initial_guess_normalized()
+    params = [h_n, rp_n, q23, F_n]
     if OPT == "SGD":
         opt = torch.optim.SGD(params, lr=LR)
     elif OPT == "LBFGS":
@@ -501,6 +551,7 @@ def solve():
 
     def closure():
         opt.zero_grad()
+        h, rp, _, foot_forces = vars_from_normalized(h_n, rp_n, q23, F_n)
         total, cost, penalty, cost_terms, penalty_terms = compute_terms(
             h, rp, q23, foot_forces
         )
@@ -517,7 +568,7 @@ def solve():
         if step % PRINT_EVERY == 0 or step == STEPS:
             print_loss(step, **_last)
 
-    return h, rp, q23, foot_forces
+    return vars_from_normalized(h_n, rp_n, q23, F_n)
 
 
 # ============================================================
